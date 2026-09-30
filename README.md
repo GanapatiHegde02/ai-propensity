@@ -1,34 +1,94 @@
-# AI Propensity Signal Collector
+<div align="center">
+
+# 🧭 AI Propensity Signal Collector
+
+**Where are you on the journey from AI-curious to AI-native?**
 
 *Free · Open-source · Privacy-first · No sign-up to preview*
 
-**Where are you on the journey from AI-curious to AI-native?** This tool extracts AI propensity signals — metadata about how you use AI, never the content of what you asked or built — from Claude Code, Codex, Claude.ai, and ChatGPT, and turns them into your **AI Propensity Index** on Valuezen. Takes under a minute. Runs entirely on your own device.
+[![Python 3](https://img.shields.io/badge/python-3.x-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)](#-requirements)
+[![Privacy](https://img.shields.io/badge/privacy-metadata%20only-blueviolet)](#-dont-take-our-word-for-it--see-exactly-what-gets-sent)
+[![Runs locally](https://img.shields.io/badge/runs-100%25%20local-success)](#-why-this-exists)
+[![Platforms](https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-lightgrey)](#-requirements)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-ff69b4)](https://github.com/ValueZen-ai/ai-propensity/pulls)
 
-## What is "AI propensity"?
+[🚀 Quickstart](#-quickstart) ·
+[🔍 What gets sent](#-dont-take-our-word-for-it--see-exactly-what-gets-sent) ·
+[🔌 Install](#-install--claude-code-adapter) ·
+[⌨️ Usage](#%EF%B8%8F-usage) ·
+[📚 Reference](#-reference) ·
+[🌐 Upload](https://app.valuezen.ai/ai-native)
+
+</div>
+
+---
+
+This tool extracts AI propensity signals — metadata about how you use AI, never the content of what you asked or built — from **Claude Code**, **Codex**, **Claude.ai**, and **ChatGPT**, and turns them into your **AI Propensity Index** on Valuezen. Takes under a minute. Runs entirely on your own device.
+
+```text
+ 💻 Local AI history  ──▶  🧹 Metadata only  ──▶  📄 One JSON file  ──▶  🌐 Upload (you choose)  ──▶  📈 Your Index
+ (Claude Code, Codex,      (no prompts, no        (you can read it)      app.valuezen.ai/ai-native
+  Claude.ai, ChatGPT)       code, no replies)
+```
+
+## 📑 Table of contents
+
+- [What is "AI propensity"?](#-what-is-ai-propensity)
+- [Why this exists](#-why-this-exists)
+- [What it does](#-what-it-does)
+- [Quickstart](#-quickstart)
+- [What you get](#-what-you-get)
+- [See exactly what gets sent](#-dont-take-our-word-for-it--see-exactly-what-gets-sent)
+- [Requirements](#-requirements)
+- [Install](#-install--claude-code-adapter) — [Claude Code](#-install--claude-code-adapter) · [Codex](#-install--codex-adapter) · [claude-web / chatgpt](#-install--claude-web--chatgpt-adapters-export-import)
+- [Usage](#%EF%B8%8F-usage)
+- [Export to Valuezen](#-export-to-valuezen)
+- [Reference](#-reference)
+
+## 🧠 What is "AI propensity"?
 
 **AI propensity is a measure of how much you actually lean on AI in real work and conversation, and how that usage behaves over time** — not a quiz score, not a certification, and not something you can cram for. It's inferred from the *metadata* your everyday AI tools already generate as a byproduct of you using them: how often you start sessions, how many turns a conversation runs, how much of your output involves AI-touched files, whether your tests still pass afterward, whether you're refining prompts or accepting the first answer. None of that requires reading a single prompt, response, or line of code — the pattern of usage is the signal, not the content.
 
 This repo is the tool that extracts that metadata, locally, and packages it into one file you choose to upload. Valuezen turns that file into your AI Propensity Index — an evidence-based, self-reported starting point, not a verdict on how "AI-native" you are.
 
-**Propensity is step one of a longer journey, not the destination.** It's an early, observed signal — deliberately unverified, because it's self-reported from your own local history. From there the path runs: **AI Propensity** (this tool — where you start) → **AI Fluency** (a benchmarked assessment of your prompting, iteration, and critical use) → **AI Quotient** (structured learning that builds that fluency into trackable applied capability) → **FDE Fluency** (real, ambiguous, production-like scenarios — the credential employers trust most). This tool only gets you onto the first step.
+**Propensity is step one of a longer journey, not the destination.** It's an early, observed signal — deliberately unverified, because it's self-reported from your own local history. From there the path runs:
 
-## Why this exists
+| Step | Stage | What it is |
+|:---:|---|---|
+| 1️⃣ | 🌱 **AI Propensity** *(this tool — where you start)* | Observed usage signal from your own local history |
+| 2️⃣ | 🎯 **AI Fluency** | A benchmarked assessment of your prompting, iteration, and critical use |
+| 3️⃣ | 📘 **AI Quotient** | Structured learning that builds that fluency into trackable applied capability |
+| 4️⃣ | 🏆 **FDE Fluency** | Real, ambiguous, production-like scenarios — the credential employers trust most |
+
+This tool only gets you onto the first step.
+
+## 🔒 Why this exists
 
 The signal about how you use AI is scattered across four different tools, each with its own history format, and nobody wants to hand a third party their prompts, their code, or their chat history just to find out where they stand. This tool collects the *signal*, not the *content* — on your own device, under your own control. Nothing leaves your machine until you explicitly export it and choose to upload it.
 
-## What it does
+## ⚙️ What it does
 
-- Reads your local AI usage history (Claude Code, Codex) or a personal data export (Claude.ai, ChatGPT) and normalizes it into a common event schema — pure metadata extraction, no content parsing.
-- **Captures:** sessions · AI turns · token counts (real counts from Claude Code and Codex; exports have no token data) · tool/skill/agent/MCP calls · files changed (counts + line deltas + language) · test-runner invocations (structural: ran + exited cleanly or not, never a parsed test count).
-- **Never captures by default:** prompts · AI responses · source code · file contents · credentials.
-- **Opt-in only (`classify`):** a bounded excerpt of your own prompts (never the assistant's replies), sent to your local `claude` CLI for a domain/topic/outcome label — never a score.
-- **Never scores anything.** This plugin only collects and exports raw evidence; Valuezen computes the AI Propensity Index after you upload it.
+- 📥 Reads your local AI usage history (Claude Code, Codex) or a personal data export (Claude.ai, ChatGPT) and normalizes it into a common event schema — pure metadata extraction, no content parsing.
+- ✅ **Captures:** sessions · AI turns · token counts (real counts from Claude Code and Codex; exports have no token data) · tool/skill/agent/MCP calls · files changed (counts + line deltas + language) · test-runner invocations (structural: ran + exited cleanly or not, never a parsed test count).
+- 🚫 **Never captures by default:** prompts · AI responses · source code · file contents · credentials.
+- 🧪 **Opt-in only (`classify`):** a bounded excerpt of your own prompts (never the assistant's replies), sent to your local `claude` CLI for a domain/topic/outcome label — never a score.
+- ⚖️ **Never scores anything.** This plugin only collects and exports raw evidence; Valuezen computes the AI Propensity Index after you upload it.
 
-Four adapters, one schema: `adapters/claude-code/` and `adapters/codex/` (hook-driven / backfill, both verified against real local history), plus `adapters/claude-web/` and `adapters/chatgpt/` (export-file import, v0 — see their module docstrings for status).
+### 🔌 Adapters
+
+| Adapter | Path | Mode | Status |
+|---|---|---|---|
+| **Claude Code** | `adapters/claude-code/` | Hook-driven + backfill | ✅ Verified against real local history |
+| **Codex** (CLI + VS Code) | `adapters/codex/` | Backfill | ✅ Verified against real local history |
+| **Claude.ai** | `adapters/claude-web/` | Export-file import | 🧪 v0 — see module docstring |
+| **ChatGPT** | `adapters/chatgpt/` | Export-file import | 🧪 v0 — see module docstring |
+
+Four adapters, one schema.
 
 ---
 
-## Quickstart
+## 🚀 Quickstart
 
 ```bash
 git clone https://github.com/ValueZen-ai/ai-propensity.git
@@ -45,11 +105,29 @@ No install step needed for this — `sync` runs directly from the clone. It prin
 
 Go to **[app.valuezen.ai/ai-native](https://app.valuezen.ai/ai-native)** and upload it there — you'll see your **AI Propensity Index** report immediately, no account needed just to preview it; sign in only if you want to save the result. Re-run `sync` any time to refresh it — it only reprocesses sessions that are new or have grown since last time, so it's cheap to run repeatedly.
 
-If you want this running automatically in the background instead of typing `sync` by hand, see [Install — Claude Code adapter](#install--claude-code-adapter) below (Codex has no hook API — `sync` by hand is the only mode there).
+If you want this running automatically in the background instead of typing `sync` by hand, see [Install — Claude Code adapter](#-install--claude-code-adapter) below (Codex has no hook API — `sync` by hand is the only mode there).
 
 ---
 
-## Don't take our word for it — see exactly what gets sent
+## 🏅 What you get
+
+After you upload your file, Valuezen generates your **AI Propensity Index** report along with a shareable **Certificate of Observed AI Propensity**:
+
+<div align="center">
+
+<img src="docs/assets/certificate-sample.png" alt="Sample Certificate of Observed AI Propensity showing an AI Propensity Index of 94/100, Advanced" width="420">
+
+*Sample certificate — illustrative values only.*
+
+</div>
+
+- 📊 **Index score (0–100)** with a level label, computed by Valuezen from your uploaded evidence — this tool never scores anything itself.
+- 🗓️ **Observation period** — how many days of activity the evidence covers.
+- 🏷️ **Self-reported · Unverified profile** — clearly marked as such. It's not a professional qualification or an assessed credential; assessed capability comes from a Valuezen assessment (see the [journey above](#-what-is-ai-propensity)).
+
+---
+
+## 🔍 Don't take our word for it — see exactly what gets sent
 
 This is the *entire* content of the file `export`/`sync` produces — the one and only file that ever leaves your device, and only when you manually upload it. This example is from Claude Code after one short session; no prompts, no AI responses, no source code, and no file contents appear anywhere in it:
 
@@ -96,11 +174,11 @@ This is the *entire* content of the file `export`/`sync` produces — the one an
 }
 ```
 
-Notice what's *not* there: no message text, no diffs, no filenames, no repo names, no test names — `file_change` only ever carries counts and a language guess, `tool_call` only carries which built-in tool ran, `test_run` only carries a pass/fail structural signal. `classify` is the one deliberate exception, and it's opt-in per adapter with its own consent prompt the first time you run it — see [Usage](#usage) below. Read [`core/event_schema.py`](core/event_schema.py) and any adapter's `collect.py` to verify this against the actual code, not just this README, before you trust it with your data.
+Notice what's *not* there: no message text, no diffs, no filenames, no repo names, no test names — `file_change` only ever carries counts and a language guess, `tool_call` only carries which built-in tool ran, `test_run` only carries a pass/fail structural signal. `classify` is the one deliberate exception, and it's opt-in per adapter with its own consent prompt the first time you run it — see [Usage](#%EF%B8%8F-usage) below. Read [`core/event_schema.py`](core/event_schema.py) and any adapter's `collect.py` to verify this against the actual code, not just this README, before you trust it with your data.
 
 ---
 
-## Requirements
+## 📋 Requirements
 
 - Python 3 (standard library only — no pip installs needed). On Windows the command is usually `python`, not `python3` — substitute it in every command below if `python3` isn't found.
 - Claude Code adapter: Claude Code itself, live
@@ -112,9 +190,9 @@ All paths shown as `~/.valuezen/...` resolve the same way on Windows, since the 
 
 ---
 
-## Install — Claude Code adapter
+## 🔌 Install — Claude Code adapter
 
-### Option A — Plugin install (recommended)
+### ⭐ Option A — Plugin install (recommended)
 
 1. Clone this repo and copy it into your project's Claude skills directory:
    ```bash
@@ -130,7 +208,7 @@ All paths shown as `~/.valuezen/...` resolve the same way on Windows, since the 
 
 Live collection now happens automatically on every tool call and session end — run `sync` again any time you want a refreshed upload file; it only reprocesses what's changed.
 
-### Option B — Manual install (no skill, hooks only)
+### 🛠️ Option B — Manual install (no skill, hooks only)
 
 ```bash
 git clone https://github.com/ValueZen-ai/ai-propensity.git
@@ -141,7 +219,7 @@ Wires `PostToolUse`/`Stop` hooks into `~/.claude/settings.json`. Restart Claude 
 
 ---
 
-## Install — Codex adapter
+## 🤖 Install — Codex adapter
 
 No install step — Codex has no documented plugin/hook API to attach to, so this adapter is backfill-only: it reads the rollout JSONL Codex already writes to disk (`~/.codex/sessions/**/*.jsonl`) on every session, whether you're on the CLI or the VS Code extension (same file format — confirmed against both on the machine this was built on).
 
@@ -155,7 +233,7 @@ There's no live/automatic mode to switch on — run `sync` by hand whenever you 
 
 ---
 
-## Install — claude-web / chatgpt adapters (export import)
+## 🌐 Install — claude-web / chatgpt adapters (export import)
 
 These have no local hook surface to attach to — the product runs server-side, so a personal data export is the only channel available. Instead:
 
@@ -168,11 +246,12 @@ These have no local hook surface to attach to — the product runs server-side, 
    ```
    Prints the upload path, `~/.valuezen/<source>/propensity-evidence-<date>.json` — each adapter writes to its own folder.
 
-**Status: v0, unverified against a real export** — field names follow each product's publicly documented export shape but haven't been run against an actual file yet. If `import` reports 0 conversations, the export's real field names likely differ from what the adapter expects; open the export JSON, compare against `_messages_of()` in that adapter's `collect.py`, and fix it there.
+> [!WARNING]
+> **Status: v0, unverified against a real export** — field names follow each product's publicly documented export shape but haven't been run against an actual file yet. If `import` reports 0 conversations, the export's real field names likely differ from what the adapter expects; open the export JSON, compare against `_messages_of()` in that adapter's `collect.py`, and fix it there.
 
 ---
 
-## Usage
+## ⌨️ Usage
 
 | Command | Claude Code | Codex | claude-web / chatgpt | What it does |
 |---|---|---|---|---|
@@ -187,7 +266,7 @@ These have no local hook surface to attach to — the product runs server-side, 
 
 ---
 
-## Export to Valuezen
+## 📤 Export to Valuezen
 
 ```bash
 python3 collect.py export
@@ -202,9 +281,9 @@ This lands under a combined-label directory instead (`~/.valuezen/claude_web+cha
 
 ---
 
-## Reference
+## 📚 Reference
 
-### Evidence store
+### 🗄️ Evidence store
 
 ```
 ~/.valuezen/propensity/events/
@@ -215,7 +294,7 @@ This lands under a combined-label directory instead (`~/.valuezen/claude_web+cha
 
 One file per day, append-only, shared across every adapter you run (same local store, `source` field distinguishes `claude_code` / `codex` / `claude_web` / `chatgpt`).
 
-### Event schema
+### 🧬 Event schema
 
 All events share this base:
 ```json
@@ -223,7 +302,7 @@ All events share this base:
 ```
 Historical/imported events also carry `historical: true`, `observed_at`, `provenance`.
 
-### Event types
+### 🏷️ Event types
 
 | Event | Key fields | Who emits it |
 |---|---|---|
@@ -238,7 +317,7 @@ Historical/imported events also carry `historical: true`, `observed_at`, `proven
 | `session_end` | trigger, ai_turns, user_turns, duration_seconds, error_count | all |
 | `session_reflect` | **advanced tier, opt-in** — tier, method, domain, topics[], task_type, outcome, outcome_rationale | all, via `classify` |
 
-### Files in this repo
+### 🗂️ Files in this repo
 
 ```
 core/                          — adapter-agnostic, shared by every adapter:
@@ -259,3 +338,11 @@ install.sh / uninstall.sh      — Claude Code manual (un)installer
 skills/run/SKILL.md            — registers /ai-collect:run in Claude Code
 README.md                      — this file
 ```
+
+---
+
+<div align="center">
+
+**Built with 💜 by [Valuezen](https://app.valuezen.ai/ai-native)** · Your data stays on your device · [Report an issue](https://github.com/ValueZen-ai/ai-propensity/issues)
+
+</div>
