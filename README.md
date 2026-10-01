@@ -111,13 +111,15 @@ If you want this running automatically in the background instead of typing `sync
 
 ## 🏅 What you get
 
-After you upload your file, Valuezen generates your **AI Propensity Index** report along with a shareable **Certificate of Observed AI Propensity**:
+After you upload your file, Valuezen generates your **AI Propensity Index** report — a per-capability **evidence breakdown** plus a shareable **Certificate of Observed AI Propensity**, included on the report itself:
 
 <div align="center">
 
-<img src="docs/assets/certificate-sample.png" alt="Sample Certificate of Observed AI Propensity showing an AI Propensity Index of 94/100, Advanced" width="420">
+<img src="docs/assets/report-sample.png" alt="Sample AI Propensity Report showing an AI Propensity Index of 94/100, Advanced, with a breakdown by capability area" width="400">
+<img src="docs/assets/evidence-sample.png" alt="Sample Propensity Evidence page showing capability areas, event counts, and activity over time" width="400">
+<img src="docs/assets/certificate-sample.png" alt="Sample Certificate of Observed AI Propensity showing an AI Propensity Index of 94/100, Advanced" width="400">
 
-*Sample certificate — illustrative values only.*
+*Sample report pages, including the evidence breakdown and certificate — illustrative values only.*
 
 </div>
 
