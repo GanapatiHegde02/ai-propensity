@@ -2,13 +2,10 @@
 """
 AI Propensity Signal Collector — Claude.ai (web) Adapter
 
-** STATUS: v0, unverified against a real export. ** Unlike the Claude Code
-adapter (built and tested against real ~/.claude/projects transcripts), this
-parser's field names are based on the publicly documented shape of Claude.ai's
-personal data export and have NOT been run against an actual export file. Try
-`import` on a real export and fix field names before relying on this for
-anything — open the export JSON and compare its shape against `_messages_of()`
-below.
+Verified against a real export (2026-10-05, 91 conversations): turn counts
+and character totals match the export (conversations with no messages are
+skipped). Conversations aren't linked to Projects in the export, so
+Project use is read from the project_knowledge_search tool instead.
 
 Why an export parser and not a browser extension or live hook: Claude.ai is
 a server-hosted web app with no local hook surface a third party can attach
@@ -76,9 +73,61 @@ def _load_export(path_str):
 
     if not isinstance(raw, list):
         print("Expected the export's top level to be a list of conversations — got something else. "
-              "This adapter is unverified against a real export; check the actual shape and fix _load_export().")
+              "The export format may have changed; check the actual shape and fix _load_export().")
         return None
     return raw
+
+
+# Parser history — bump when _features_of()/cmd_import() change what's
+# extracted, so the next import replaces older claude_web evidence instead
+# of skipping conversations it has already seen.
+#   2 (2026-10-05): per-conversation `features`; conversations that changed
+#     since the last import are replaced rather than skipped.
+PARSER_VERSION = 2
+
+_WEB_TOOLS = ("web_search", "web_search_fast", "web_fetch")
+_CREATE_TOOLS = ("create_file", "artifacts", "repl", "present_files")
+_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic")
+# Claude.ai's built-in connectors. Tool names for others vary, so this is a
+# known-names list, not a guess from the name's shape.
+_CONNECTOR_PREFIXES = (
+    "google_drive", "gdrive", "gmail", "gcal", "google_calendar", "slack", "notion",
+    "github", "asana", "linear", "jira", "confluence", "atlassian",
+)
+
+
+def _features_of(conversation):
+    """Which optional Claude.ai capabilities this conversation used —
+    presence only, read from tool names, attachment metadata and block
+    types, never message text. Keys: web_search, file_upload, image_input,
+    reasoning, deep_research, projects, connectors, created_files."""
+    features = set()
+    for m in conversation.get("chat_messages", []) or []:
+        if m.get("attachments"):
+            features.add("file_upload")
+        for f in m.get("files") or []:
+            name = ((f or {}).get("file_name") or "").lower()
+            features.add("image_input" if name.endswith(_IMAGE_EXTS) else "file_upload")
+        for block in m.get("content") or []:
+            if not isinstance(block, dict):
+                continue
+            kind = block.get("type")
+            if kind == "thinking":
+                features.add("reasoning")
+            if kind != "tool_use":
+                continue
+            name = (block.get("name") or "").lower()
+            if name in _WEB_TOOLS:
+                features.add("web_search")
+            elif name in _CREATE_TOOLS:
+                features.add("created_files")
+            elif name == "project_knowledge_search":
+                features.add("projects")
+            elif "research" in name:
+                features.add("deep_research")
+            elif name.startswith(_CONNECTOR_PREFIXES):
+                features.add("connectors")
+    return features
 
 
 def _messages_of(conversation):
@@ -104,14 +153,25 @@ def cmd_import():
         return
 
     total_sessions = 0
+    refreshed = 0
     skipped = 0
     total_events = 0
 
+    reparse_all = local_storage.reset_source_if_parser_changed(SOURCE, PARSER_VERSION)
+    if reparse_all:
+        print(f"Collector updated (parser v{PARSER_VERSION}) — replacing previously imported Claude.ai evidence.")
+
+    pending = []  # (session_id, version, events)
+    to_refresh = set()
     for conv in conversations:
         session_id = conv.get("uuid") or conv.get("id") or ""
         if not session_id:
             continue
-        if local_storage.already_backfilled(session_id):
+        # A conversation that gained messages since the last import has a
+        # newer updated_at — replace it rather than skipping it as seen.
+        version = str(conv.get("updated_at") or "")
+        recorded = None if reparse_all else local_storage.backfill_mtime(session_id)
+        if recorded is not None and recorded == version:
             skipped += 1
             continue
 
@@ -130,19 +190,13 @@ def cmd_import():
 
         # ai_turn events deliberately carry no token fields — the export
         # contains message text, never API-level usage numbers. Counting
-        # turns is still valid raw evidence — Valuezen's scoring only
+        # turns is still valid raw evidence — AI Interaction only
         # needs the turn count here, not token fields.
         for m in messages:
             if m["role"] == "assistant":
                 events.append(event_schema.make_event("ai_turn", session_id, SOURCE, {},
                                                         ts=m["ts"] or start_ts, historical=True, observed_at=event_schema.utcnow()))
 
-        # `edit_count` is deliberately absent here, not zero — whether
-        # Claude.ai's `chat_messages` export shape exposes edit/regenerate
-        # structure at all is unverified, unlike ChatGPT's `mapping`
-        # tree branching, which the chatgpt adapter reads directly. Leaving
-        # the field out lets Valuezen's scoring treat this honestly as
-        # "no edit-tracking data" rather than claiming a false zero.
         events.append(event_schema.make_event("session_end", session_id, SOURCE, {
             "trigger": "export_import",
             "ai_turns": ai_turns,
@@ -150,28 +204,39 @@ def cmd_import():
             "duration_seconds": event_schema.duration_seconds(start_ts, end_ts),
             "user_chars_total": sum(len(m["text"]) for m in messages if m["role"] in ("human", "user")),
             # No real token counts exist in this export (see module
-            # docstring), so this is the closest honest substitute for a
-            # "response substance" signal — never the text itself, just
-            # its length. Valuezen's scoring uses it as a labeled proxy,
-            # not a token count, when no real token fields are present.
+            # docstring). Lengths only, never the text: Valuezen uses
+            # user + AI characters ÷ 4 for an *estimated* Token Usage
+            # figure that's shown on the report but not scored.
             "ai_chars_total": sum(len(m["text"]) for m in messages if m["role"] == "assistant"),
+            "features": sorted(_features_of(conv)),
         }, ts=end_ts or start_ts, historical=True, observed_at=event_schema.utcnow()))
 
-        total_sessions += 1
+        if recorded is not None:
+            to_refresh.add(session_id)
+            refreshed += 1
+        else:
+            total_sessions += 1
+        pending.append((session_id, version, events))
+
+    local_storage.remove_sessions_events(to_refresh)
+    for session_id, version, events in pending:
         for ev in events:
             date_str = (ev.get("ts") or "")[:10] or datetime.date.today().isoformat()
             local_storage.append_event(ev, date_str)
             total_events += 1
+        local_storage.set_backfill_mtime(session_id, version)
+    local_storage.set_parser_version(SOURCE, PARSER_VERSION)
 
     print("Import complete.")
     print(f"  Conversations imported : {total_sessions}")
-    print(f"  Skipped (already seen) : {skipped}")
+    print(f"  Updated since last time: {refreshed}")
+    print(f"  Skipped (unchanged)    : {skipped}")
     print(f"  Events written         : {total_events}")
     print(f"  Store location         : {local_storage.STORE_DIR}")
-    if total_sessions == 0 and skipped == 0:
+    if total_sessions == 0 and skipped == 0 and refreshed == 0:
         print()
         print("Zero conversations imported — this most likely means the export's real field")
-        print("names don't match what this v0 adapter expects. Inspect the export JSON by hand")
+        print("names no longer match what this adapter expects. Inspect the export JSON by hand")
         print("and fix _messages_of()/cmd_import() in this file before relying on it.")
 
 

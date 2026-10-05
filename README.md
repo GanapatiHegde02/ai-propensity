@@ -78,10 +78,10 @@ The signal about how you use AI is scattered across four different tools, each w
 
 | Adapter | Path | Mode | Status |
 |---|---|---|---|
-| **Claude Code** | `adapters/claude-code/` | Hook-driven + backfill | ✅ Verified against real local history |
+| **Claude Code** | `adapters/claude-code/` | Backfill | ✅ Verified against real local history |
 | **Codex** (CLI + VS Code) | `adapters/codex/` | Backfill | ✅ Verified against real local history |
-| **Claude.ai** | `adapters/claude-web/` | Export-file import | 🧪 v0 — see module docstring |
-| **ChatGPT** | `adapters/chatgpt/` | Export-file import | 🧪 v0 — see module docstring |
+| **Claude.ai** | `adapters/claude-web/` | Export-file import | ✅ Verified against a real export |
+| **ChatGPT** | `adapters/chatgpt/` | Export-file import | ✅ Verified against a real export |
 
 Four adapters, one schema.
 
@@ -104,7 +104,7 @@ No install step needed for this — `sync` runs directly from the clone. It prin
 
 Go to **[app.valuezen.ai/ai-native](https://app.valuezen.ai/ai-native)** and upload it there — you'll see your **AI Propensity Index** report immediately, no account needed just to preview it; sign in only if you want to save the result. Re-run `sync` any time to refresh it — it only reprocesses sessions that are new or have grown since last time, so it's cheap to run repeatedly.
 
-If you want this running automatically in the background instead of typing `sync` by hand, see [Install — Claude Code adapter](#-install--claude-code-adapter) below (Codex has no hook API — `sync` by hand is the only mode there).
+Collection is always `sync`-driven: it reads the history your tools already keep on disk, so nothing needs to run in the background while you work. Installing the Claude Code plugin (below) just adds the `/ai-collect:run sync` shortcut.
 
 ---
 
@@ -199,23 +199,20 @@ All paths shown as `~/.valuezen/...` resolve the same way on Windows, since the 
    git clone https://github.com/ValueZen-ai/ai-propensity.git
    cp -r ai-propensity <your-project>/.claude/skills/ai-collect
    ```
-2. In Claude Code, run `/reload-plugins` — expect `1 plugin · 1 skill · 2 hooks`.
+2. In Claude Code, run `/reload-plugins` — expect `1 plugin · 1 skill`.
 3. Recover existing history and produce the upload file:
    ```
    /ai-collect:run sync
    ```
    This prints the path to the file you upload (`~/.valuezen/<source>/propensity-evidence-<date>.json`).
 
-Live collection now happens automatically on every tool call and session end — run `sync` again any time you want a refreshed upload file; it only reprocesses what's changed.
+Run `sync` again any time you want a refreshed upload file; it only reprocesses what's changed.
 
-### 🛠️ Option B — Manual install (no skill, hooks only)
+> **Upgrading from an earlier version?** Earlier versions wired `PostToolUse`/`Stop` hooks that recorded evidence live. That evidence was double-counted against `sync` and the Stop hook never saw the transcript, so the hooks no longer record anything — `sync` reads the transcripts directly. Your next `sync` re-reads all history once and replaces everything the older version collected. Old hook entries are harmless no-ops; `bash uninstall.sh` removes them.
 
-```bash
-git clone https://github.com/ValueZen-ai/ai-propensity.git
-cd ai-propensity
-bash install.sh
-```
-Wires `PostToolUse`/`Stop` hooks into `~/.claude/settings.json`. Restart Claude Code, then run `collect.py` directly from `adapters/claude-code/`.
+### 🛠️ Option B — No install
+
+Run `collect.py` directly from a clone, as in the Quickstart — the plugin only adds the slash command. `install.sh` just creates the evidence folder and, for older installs, removes the retired hooks.
 
 ---
 
@@ -246,8 +243,8 @@ These have no local hook surface to attach to — the product runs server-side, 
    ```
    Prints the upload path, `~/.valuezen/<source>/propensity-evidence-<date>.json` — each adapter writes to its own folder.
 
-> [!WARNING]
-> **Status: v0, unverified against a real export** — field names follow each product's publicly documented export shape but haven't been run against an actual file yet. If `import` reports 0 conversations, the export's real field names likely differ from what the adapter expects; open the export JSON, compare against `_messages_of()` in that adapter's `collect.py`, and fix it there.
+> [!NOTE]
+> **Verified against real exports** (ChatGPT, including the split `conversations-NNN.json` form; Claude.ai). Exports carry message text but no token counts, so chat evidence never has real token numbers. ChatGPT exports keep only the final branch of each chat, so edits and regenerations aren't visible. If `import` ever reports 0 conversations, the export format has likely changed; compare it against `_messages_of()` in that adapter's `collect.py`.
 
 ---
 
@@ -257,10 +254,10 @@ These have no local hook surface to attach to — the product runs server-side, 
 |---|---|---|---|---|
 | `sync` / `sync <path>` | ✅ | ✅ | ✅ | **The one command to run regularly.** Collect (or import) + export in one call — picks up anything new, writes the ready-to-upload JSON, tells you its path. |
 | `setup` | ✅ | ✅ | — | Just the collection half of `sync`. Safe to re-run — unchanged sessions are skipped cheaply; a grown session is re-parsed and its stale partial capture replaced. |
-| `import <path>` | — | — | ✅ | Just the import half of `sync`. Same skip-if-seen behavior as `setup` (session-presence only, not mtime-aware — a finished export doesn't grow). |
+| `import <path>` | — | — | ✅ | Just the import half of `sync`. Conversations unchanged since the last import are skipped; one that has changed since (newer `update_time`) is replaced, so importing a fresh export picks up new messages. |
 | `summary` | ✅ | ✅ | ✅ | Print raw tallies — counts and sums only, no scores, no ratios, no cost estimate. |
 | `export` | ✅ | ✅ | ✅ | Write `~/.valuezen/<source>/propensity-evidence-<date>.json` for upload to Valuezen. |
-| `status` | ✅ | ✅ (no hooks to report — just store stats) | — | Hook wiring (Claude Code) / event store stats. |
+| `status` | ✅ | ✅ | — | Event store stats. |
 | `prune [days]` / `retention [days]` | ✅ | ✅ | ✅ / — | Apply/configure local retention. |
 
 ---
@@ -329,9 +326,9 @@ core/                          — adapter-agnostic, shared by every adapter:
 adapters/
 ├── claude-code/collect.py     —   built, verified against real local history
 ├── codex/collect.py           —   built, verified against real local history (CLI + VS Code extension)
-├── claude-web/collect.py      —   v0, export-import, unverified
-└── chatgpt/collect.py         —   v0, export-import, unverified
-install.sh / uninstall.sh      — Claude Code manual (un)installer
+├── claude-web/collect.py      —   export-import, verified against a real export
+└── chatgpt/collect.py         —   export-import, verified against a real export
+install.sh / uninstall.sh      — creates the store / removes it (and any retired hooks)
 .claude-plugin/plugin.json     — plugin manifest
 skills/run/SKILL.md            — registers /ai-collect:run in Claude Code
 README.md                      — this file

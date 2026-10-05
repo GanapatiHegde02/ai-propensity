@@ -20,14 +20,17 @@ this machine's real files):
   session_meta   payload: {id, session_id, cwd, originator, cli_version,
                             thread_source ("user"/"subagent"/absent)}
   turn_context   payload: {turn_id, model, cwd, ...}      — one per turn
-  event_msg      payload.type: user_message, agent_message, task_started,
-                                task_complete, token_count, patch_apply_end,
-                                context_compacted, turn_aborted, ...
-  response_item  payload.type: message (role user/assistant/developer),
-                                function_call (name: exec_command,
+  event_msg      payload.type: token_count, task_started, task_complete,
+                                turn_aborted, ...; older versions also wrote
+                                user_message and patch_apply_end, which
+                                current Codex no longer does (2026-10)
+  response_item  payload.type: message (role user/assistant/developer —
+                                user prompts live here now, alongside
+                                injected environment/AGENTS.md context),
+                                function_call (exec_command, shell_command,
                                 view_image, write_stdin, update_plan),
-                                function_call_output, custom_tool_call
-                                (name: apply_patch), reasoning, ...
+                                custom_tool_call (apply_patch — every file
+                                edit), *_output, web_search_call, reasoning
 
 `thread_source: "subagent"` sessions (e.g. an internal risk-judging pass)
 are skipped entirely — they're not the user's own usage.
@@ -36,9 +39,9 @@ Privacy-first, same as every adapter: tool names, token counts (Codex's
 own token_count events give real, not-estimated input/output/cached
 numbers), file-change line deltas (from apply_patch's unified diff) and
 language, and a structural test-run signal (did an exec_command matching a
-known test runner run, did it exit 0 — via "Process exited with code N" in
-its own output, never a parsed pass/fail count — see
-for why). Never prompt or response content.
+known test runner run, did it exit 0 — via the exit code Codex prints in
+its own output, never a parsed pass/fail count). Never prompt or response
+content.
 """
 
 import datetime
@@ -56,7 +59,99 @@ from core import event_schema, local_storage, retention, export as core_export, 
 SOURCE = "codex"
 CODEX_SESSIONS = Path.home() / ".codex" / "sessions"
 
-EXIT_CODE_RE = re.compile(r"Process exited with code (\d+)")
+# Bump whenever parse_conversation() changes what it extracts from the same
+# rollout file — `setup`/`sync` then replace every codex event written by the
+# older parser instead of mixing old and new numbers.
+#   2 (2026-10-05): user prompts read from `response_item` user messages
+#     (newer Codex no longer writes event_msg user_message); file changes
+#     and tool calls read from `custom_tool_call` apply_patch (newer Codex
+#     no longer writes patch_apply_end); one ai_turn per model response with
+#     tokens taken from the running total_token_usage (summing
+#     last_token_usage over-counted, since token_count is often repeated);
+#     input_tokens now excludes cached input, matching Claude Code's
+#     meaning; per-session `features`; programming languages only.
+PARSER_VERSION = 2
+
+# Older Codex prints "Process exited with code N"; newer prints "Exit code: N".
+EXIT_CODE_RE = re.compile(r"(?:Process exited with code|Exit code:)\s*(\d+)")
+
+# `response_item` user messages that Codex injects rather than the person
+# typing them. A message counts as a prompt if any of its parts is real
+# input (typed text or an attached image). VS Code's "# Context from my IDE"
+# wrapper *is* a typed prompt — the request follows the IDE context.
+_INJECTED_PREFIXES = (
+    "<environment_context", "# AGENTS.md", "<user_instructions", "<turn_aborted",
+    "<permissions", "<user_shell_command",
+)
+_PATCH_FILE_RE = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$")
+
+
+def _typed_user_message(payload):
+    """For a `response_item` user message: (is_prompt, has_image)."""
+    is_prompt = has_image = False
+    for c in payload.get("content") or []:
+        if not isinstance(c, dict):
+            continue
+        if c.get("type") == "input_image":
+            is_prompt = has_image = True
+        elif c.get("type") == "input_text":
+            text = (c.get("text") or "").lstrip()
+            if text and not text.startswith(_INJECTED_PREFIXES):
+                is_prompt = True
+    return is_prompt, has_image
+
+
+def _patch_stats(patch_text):
+    """(files, lines_added, lines_removed) from an apply_patch body. Counts
+    only the +/- lines inside hunks — never stores the text."""
+    files, added, removed = set(), 0, 0
+    for ln in (patch_text or "").splitlines():
+        m = _PATCH_FILE_RE.match(ln)
+        if m:
+            files.add(m.group(1).strip())
+        elif ln.startswith("***"):
+            continue
+        elif ln.startswith("+"):
+            added += 1
+        elif ln.startswith("-"):
+            removed += 1
+    return files, added, removed
+
+
+def _output_text(output):
+    if isinstance(output, str):
+        try:
+            parsed = json.loads(output)
+            if isinstance(parsed, dict) and isinstance(parsed.get("output"), str):
+                return parsed["output"]
+        except Exception:
+            pass
+        return output
+    return json.dumps(output)  # some tools (e.g. view_image) return structured output, not text
+
+
+def _call_failed(output_text):
+    m = EXIT_CODE_RE.search(output_text)
+    if m:
+        return m.group(1) != "0"
+    return False
+
+
+def _patch_failed(output_text):
+    if "Success." in output_text:
+        return False
+    return _call_failed(output_text) or "failed" in output_text.lower()
+
+
+def _shell_cmd(arguments):
+    try:
+        args = json.loads(arguments or "{}")
+    except Exception:
+        return None
+    cmd = args.get("cmd") or args.get("command")
+    if isinstance(cmd, list):
+        cmd = " ".join(str(c) for c in cmd)
+    return cmd if isinstance(cmd, str) else None
 
 
 # ---------------------------------------------------------------------------
@@ -71,13 +166,16 @@ def parse_conversation(fpath, observed_at):
     cli_version = None
     session_start_ts = None
     session_end_ts = None
-    user_turns = 0
+    prompts_from_items = 0     # response_item user messages (current format)
+    prompts_from_events = 0    # event_msg user_message (older format)
     ai_turns = []
-    turn_models = {}
-    turn_token_usage = {}  # turn_id -> running {input, output, cached, reasoning}
-    current_turn_id = None
-    pending_calls = {}  # call_id -> {"name": str, "cmd": str|None}
-    tool_events = []  # (name, success)
+    models = set()
+    current_model = None
+    features = set()
+    last_totals = None         # running total_token_usage as of the previous ai_turn
+    pending_calls = {}         # call_id -> {"name": str, "cmd": str|None, "patch": str|None}
+    patched_call_ids = set()   # apply_patch calls already counted (both formats may log one patch)
+    tool_events = []           # (name, success)
     touched_files = set()
     lines_added = 0
     lines_removed = 0
@@ -85,6 +183,16 @@ def parse_conversation(fpath, observed_at):
     tests_total = 0
     tests_passed = 0
     error_count = 0
+
+    def _record_patch(files, added, removed):
+        nonlocal lines_added, lines_removed
+        for file_path in files:
+            touched_files.add(file_path)
+            lang = shell_signals.language_for(file_path)
+            if lang:
+                languages[lang] = languages.get(lang, 0) + 1
+        lines_added += added
+        lines_removed += removed
 
     try:
         with open(fpath) as f:
@@ -114,90 +222,127 @@ def parse_conversation(fpath, observed_at):
             cli_version = p.get("cli_version") or cli_version
 
         elif t == "turn_context":
-            turn_id = p.get("turn_id")
-            if turn_id:
-                turn_models[turn_id] = p.get("model")
+            current_model = p.get("model") or current_model
+            if current_model:
+                models.add(current_model)
+            if ((p.get("collaboration_mode") or {}).get("mode")) == "plan":
+                features.add("plan_mode")
 
         elif t == "event_msg":
             pt = p.get("type")
 
             if pt == "user_message":
-                user_turns += 1
-
-            elif pt == "task_started":
-                current_turn_id = p.get("turn_id")
-                turn_token_usage.setdefault(current_turn_id, {"input": 0, "output": 0, "cached": 0, "reasoning": 0})
+                prompts_from_events += 1
+                if p.get("images"):
+                    features.add("image_input")
 
             elif pt == "token_count":
-                last = ((p.get("info") or {}).get("last_token_usage")) or {}
-                bucket = turn_token_usage.setdefault(current_turn_id, {"input": 0, "output": 0, "cached": 0, "reasoning": 0})
-                bucket["input"] += last.get("input_tokens", 0)
-                bucket["output"] += last.get("output_tokens", 0)
-                bucket["cached"] += last.get("cached_input_tokens", 0)
-                bucket["reasoning"] += last.get("reasoning_output_tokens", 0)
-
-            elif pt == "task_complete":
-                turn_id = p.get("turn_id")
-                usage = turn_token_usage.get(turn_id, {})
-                if usage.get("input") or usage.get("output"):
-                    ai_turns.append({
-                        "model": turn_models.get(turn_id, ""),
-                        "input_tokens": usage.get("input", 0),
-                        "output_tokens": usage.get("output", 0),
-                        "cache_read_tokens": usage.get("cached", 0),
-                        "reasoning_output_tokens": usage.get("reasoning", 0),
-                        "ts": ts or session_start_ts,
-                    })
+                # One model response = one increase in the running total.
+                # token_count is often written twice per response (and with
+                # info null at turn boundaries), so it's the change in
+                # total_token_usage — not each event's last_token_usage —
+                # that marks a response and carries its tokens. Summed over
+                # the session this equals Codex's own final total exactly.
+                totals = ((p.get("info") or {}).get("total_token_usage")) or {}
+                if not totals.get("total_tokens"):
+                    continue
+                prev = last_totals or {}
+                if totals.get("total_tokens", 0) <= prev.get("total_tokens", 0):
+                    continue
+                d_in = totals.get("input_tokens", 0) - prev.get("input_tokens", 0)
+                d_cached = totals.get("cached_input_tokens", 0) - prev.get("cached_input_tokens", 0)
+                d_out = totals.get("output_tokens", 0) - prev.get("output_tokens", 0)
+                d_reason = totals.get("reasoning_output_tokens", 0) - prev.get("reasoning_output_tokens", 0)
+                last_totals = totals
+                ai_turns.append({
+                    "model": current_model or "",
+                    # Codex's input_tokens includes the cached part; split
+                    # it so input_tokens means fresh input, as it does for
+                    # Claude Code, and cache_read_tokens the reused part.
+                    "input_tokens": max(0, d_in - d_cached),
+                    "output_tokens": max(0, d_out),
+                    "cache_read_tokens": max(0, d_cached),
+                    "reasoning_output_tokens": max(0, d_reason),
+                    "ts": ts or session_start_ts,
+                })
 
             elif pt == "patch_apply_end":
+                # Older format: a separate event per applied patch.
+                call_id = p.get("call_id")
+                if call_id and call_id in patched_call_ids:
+                    continue
+                if call_id:
+                    patched_call_ids.add(call_id)
                 success = bool(p.get("success", True))
                 tool_events.append(("apply_patch", success))
                 if not success:
                     error_count += 1
+                    continue
+                files, added, removed = set(), 0, 0
                 for file_path, change in (p.get("changes") or {}).items():
-                    touched_files.add(file_path)
-                    lang = shell_signals.language_for(file_path)
-                    if lang:
-                        languages[lang] = languages.get(lang, 0) + 1
-                    diff = change.get("unified_diff", "") or ""
-                    for dl in diff.splitlines():
+                    files.add(file_path)
+                    for dl in (change.get("unified_diff", "") or "").splitlines():
                         if dl.startswith("+++") or dl.startswith("---"):
                             continue
                         if dl.startswith("+"):
-                            lines_added += 1
+                            added += 1
                         elif dl.startswith("-"):
-                            lines_removed += 1
+                            removed += 1
+                _record_patch(files, added, removed)
 
         elif t == "response_item":
             pt = p.get("type")
 
-            if pt == "function_call":
-                call_id = p.get("call_id")
-                name = p.get("name", "")
-                cmd = None
-                if name == "exec_command":
-                    try:
-                        cmd = json.loads(p.get("arguments", "{}")).get("cmd")
-                    except Exception:
-                        cmd = None
-                pending_calls[call_id] = {"name": name, "cmd": cmd}
+            if pt == "message" and p.get("role") == "user":
+                is_prompt, has_image = _typed_user_message(p)
+                if is_prompt:
+                    prompts_from_items += 1
+                if has_image:
+                    features.add("image_input")
 
-            elif pt == "function_call_output":
+            elif pt == "web_search_call":
+                features.add("web_search")
+                tool_events.append(("web_search", True))
+
+            elif pt in ("function_call", "custom_tool_call"):
+                name = p.get("name", "")
+                pending_calls[p.get("call_id")] = {
+                    "name": name,
+                    "cmd": _shell_cmd(p.get("arguments")) if name in ("exec_command", "shell_command", "shell") else None,
+                    "patch": p.get("input") if name == "apply_patch" else None,
+                }
+                if name == "apply_patch" and p.get("arguments") and not p.get("input"):
+                    try:  # function_call form carries the patch inside arguments
+                        pending_calls[p.get("call_id")]["patch"] = json.loads(p["arguments"]).get("input")
+                    except Exception:
+                        pass
+
+            elif pt in ("function_call_output", "custom_tool_call_output"):
                 call_id = p.get("call_id")
-                origin = pending_calls.pop(call_id, {})
-                name = origin.get("name", "tool")
-                output = p.get("output", "") or ""
-                if not isinstance(output, str):
-                    output = json.dumps(output)  # some tools (e.g. view_image) return structured output, not text
-                is_error = False
-                m = EXIT_CODE_RE.search(output)
-                if m:
-                    is_error = m.group(1) != "0"
-                if is_error:
+                origin = pending_calls.pop(call_id, None)
+                if origin is None:
+                    continue
+                name = origin.get("name") or "tool"
+                out = _output_text(p.get("output", "") or "")
+
+                if name == "apply_patch":
+                    if call_id in patched_call_ids:
+                        continue
+                    patched_call_ids.add(call_id)
+                    failed = _patch_failed(out)
+                    tool_events.append(("apply_patch", not failed))
+                    if failed:
+                        error_count += 1
+                    else:
+                        _record_patch(*_patch_stats(origin.get("patch")))
+                    continue
+
+                failed = _call_failed(out)
+                if failed:
                     error_count += 1
-                tool_events.append((name, not is_error))
-                if name == "exec_command" and origin.get("cmd"):
-                    tr = shell_signals.test_run_for_command(origin["cmd"], is_error)
+                tool_events.append((name, not failed))
+                if origin.get("cmd"):
+                    tr = shell_signals.test_run_for_command(origin["cmd"], failed)
                     if tr:
                         tests_total += tr[0]
                         tests_passed += tr[1]
@@ -210,11 +355,15 @@ def parse_conversation(fpath, observed_at):
     if cwd is None and originator is None:
         return []
 
+    # Both formats can coexist in one file; whichever saw more prompts is
+    # the one this Codex version actually wrote.
+    user_turns = max(prompts_from_items, prompts_from_events)
+
     base_ts = session_start_ts or observed_at
     project = Path(cwd).name if cwd else ""
 
     events.append(event_schema.make_event("session_start", session_id, SOURCE, {
-        "model": next((m for m in turn_models.values() if m), None),
+        "model": next(iter(sorted(models)), None),
         "project": project,
         "originator": originator,
         "cli_version": cli_version,
@@ -262,11 +411,15 @@ def parse_conversation(fpath, observed_at):
         "multi_step": total_tool_calls > 1,
         "duration_seconds": dur,
         "error_count": error_count,
-        "bash_error_count": error_count,  # exec_command is Codex's only shell-tool signal, same role as Claude Code's Bash
-        "models_used": sorted({m for m in turn_models.values() if m}),
+        "bash_error_count": error_count,  # shell commands are Codex's main tool, same role as Claude Code's Bash
+        "models_used": sorted(models),
+        # Which optional capabilities this session used — presence only.
+        # Keys: plan_mode, web_search, image_input. Feeds Feature Exploration.
+        "features": sorted(features),
     }, ts=session_end_ts or base_ts, historical=True, observed_at=observed_at))
 
     return events
+
 
 
 def cmd_backfill():
@@ -282,10 +435,16 @@ def cmd_backfill():
     observed_at = event_schema.utcnow()
     new_sessions = refreshed_sessions = skipped = total_events = skipped_subagent = 0
 
+    reparse_all = local_storage.reset_source_if_parser_changed(SOURCE, PARSER_VERSION)
+    if reparse_all:
+        print(f"Collector updated (parser v{PARSER_VERSION}) — re-reading all Codex history once.")
+
+    parsed = []  # (session_id, mtime, events)
+    to_refresh = set()
     for conv_file in sorted(CODEX_SESSIONS.glob("**/*.jsonl")):
         session_id = conv_file.stem
         current_mtime = conv_file.stat().st_mtime
-        recorded_mtime = local_storage.backfill_mtime(session_id)
+        recorded_mtime = None if reparse_all else local_storage.backfill_mtime(session_id)
 
         if recorded_mtime is not None and current_mtime <= recorded_mtime:
             skipped += 1
@@ -298,17 +457,23 @@ def cmd_backfill():
             continue
 
         if recorded_mtime is not None:
-            local_storage.remove_session_events(session_id)
+            to_refresh.add(session_id)
             refreshed_sessions += 1
         else:
             new_sessions += 1
+        parsed.append((session_id, current_mtime, evs))
 
+    # One pass over the store for every grown session, not one per session.
+    local_storage.remove_sessions_events(to_refresh)
+
+    for session_id, current_mtime, evs in parsed:
         for ev in evs:
             date_str = ev.get("ts", "")[:10] or datetime.date.today().isoformat()
             local_storage.append_event(ev, date_str)
             total_events += 1
-
         local_storage.set_backfill_mtime(session_id, current_mtime)
+
+    local_storage.set_parser_version(SOURCE, PARSER_VERSION)
 
     print("Backfill complete.")
     print(f"  New sessions        : {new_sessions}")
@@ -348,10 +513,16 @@ def _session_excerpt(fpath, max_chars=6000):
                     d = json.loads(line.strip())
                 except Exception:
                     continue
-                if d.get("type") == "event_msg" and (d.get("payload") or {}).get("type") == "user_message":
-                    msg = d["payload"].get("message", "")
+                p = d.get("payload") or {}
+                if d.get("type") == "event_msg" and p.get("type") == "user_message":
+                    msg = p.get("message", "")
                     if isinstance(msg, str) and msg.strip():
                         parts.append(msg.strip())
+                elif d.get("type") == "response_item" and p.get("type") == "message" and p.get("role") == "user":
+                    for c in p.get("content") or []:
+                        text = (c.get("text") or "").strip() if isinstance(c, dict) and c.get("type") == "input_text" else ""
+                        if text and not text.startswith(_INJECTED_PREFIXES):
+                            parts.append(text)
     except Exception:
         return ""
     return "\n".join(parts)[:max_chars]

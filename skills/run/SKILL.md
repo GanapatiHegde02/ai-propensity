@@ -41,7 +41,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/adapters/claude-code/collect.py" export 14     # 
 Tell the user the path to the exported file and that it's ready to upload at app.valuezen.ai/ai-native.
 
 ### `status`
-Check whether hooks are active, show event store stats, and surface any logged hook errors.
+Show event store stats (and any errors logged by older hook-based versions).
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/adapters/claude-code/collect.py" status
 ```
@@ -67,6 +67,6 @@ Show the available subcommands and a one-line description of each.
 ## Notes
 - Never show or expose raw prompt text, AI response content, file contents, or source code — the collector stores metadata only.
 - The plugin never computes a score, tier, or verdict — every score, tier, or verdict is computed by Valuezen after you upload the exported file, never by this plugin.
-- Live collection is automatic — hooks fire on every tool call and session end while this plugin is installed.
-- Run `setup` once after installing to recover evidence from past Claude Code sessions.
-- To stop collecting, tell the user to run `${CLAUDE_PLUGIN_ROOT}/uninstall.sh` (or uninstall the plugin via `/plugin uninstall ai-collect`), which removes the hooks from `settings.json`.
+- Nothing is collected in the background — `sync` reads the Claude Code transcripts already on disk, so run it whenever the user wants a fresh upload file.
+- After upgrading from an older version, the first `sync` re-reads all history once and replaces the older evidence (earlier versions double-counted).
+- To remove collected evidence, tell the user to run `${CLAUDE_PLUGIN_ROOT}/uninstall.sh` (or uninstall the plugin via `/plugin uninstall ai-collect`).

@@ -3,7 +3,7 @@
 AI Propensity Signal Collector — Claude Code Adapter
 
 Extracts observable AI-usage signals from a local Claude Code installation
-(~/.claude/projects transcripts, PostToolUse/Stop hooks) and normalizes them
+(~/.claude/projects transcripts, read by `setup`/`sync`) and normalizes them
 into the common event schema defined in core/event_schema.py. This file is
 adapter-specific; everything platform-agnostic (schema, storage, retention,
 export, summary, LLM self-classification) lives in ../../core so other
@@ -29,6 +29,60 @@ from core import event_schema, local_storage, retention, export as core_export, 
 SOURCE = "claude_code"
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 ERROR_LOG = Path.home() / ".valuezen" / "propensity" / "hook-errors.log"
+
+# Bump whenever parse_conversation() changes what it extracts from the same
+# transcript — `setup`/`sync` then replace every claude_code event written
+# by the older parser instead of mixing old and new numbers.
+#   2 (2026-10-05): one ai_turn per API response (message.id), not per
+#     transcript line; user_turns counts typed prompts only; languages are
+#     programming languages only; per-session `features`; live hooks no
+#     longer write evidence.
+PARSER_VERSION = 2
+
+SUBAGENT_TOOLS = ("Agent", "Task")  # "Task" is the subagent tool's older name
+WEB_TOOLS = ("WebSearch", "WebFetch")
+PLAN_TOOLS = ("EnterPlanMode", "ExitPlanMode")
+
+# `user`-type transcript lines that the person didn't type: tool results are
+# handled separately (they're nested blocks, never text), these are the
+# string-content ones — background-task notices, local command output,
+# interrupt markers and injected reminders.
+_NOT_TYPED_PREFIXES = (
+    "<task-notification", "<local-command", "<bash-stdout", "<bash-stderr",
+    "[Request interrupted", "<system-reminder",
+)
+
+
+def _typed_prompt_blocks(d):
+    """For a `user` transcript line, the set of block kinds ("text",
+    "image") if it's a prompt the person actually typed — or None if it's
+    a tool result, a compaction summary, injected meta context or one of
+    _NOT_TYPED_PREFIXES. Claude Code logs every tool result as its own
+    `user` line, so counting every `user` line (the pre-2 behaviour)
+    reported roughly 12x the real number of prompts."""
+    if d.get("isMeta") or d.get("isCompactSummary") or d.get("toolUseResult") is not None:
+        return None
+    content = (d.get("message") or {}).get("content", "")
+    if isinstance(content, str):
+        text = content.strip()
+        if not text or text.startswith(_NOT_TYPED_PREFIXES):
+            return None
+        return {"text"}
+    if not isinstance(content, list):
+        return None
+    kinds = set()
+    for c in content:
+        if not isinstance(c, dict):
+            continue
+        if c.get("type") == "tool_result":
+            return None
+        if c.get("type") == "text":
+            text = (c.get("text") or "").strip()
+            if text and not text.startswith(_NOT_TYPED_PREFIXES):
+                kinds.add("text")
+        elif c.get("type") == "image":
+            kinds.add("image")
+    return kinds or None
 
 
 def log_hook_error(context, exc):
@@ -62,179 +116,35 @@ def _lines_for_tool_use(name, inp):
 
 
 # ---------------------------------------------------------------------------
-# Live hook handlers
+# Live hooks — retired (parser version 2)
+#
+# The PostToolUse/Stop hooks used to write tool_call/file_change/session_end
+# events as you worked. Two defects made that evidence wrong rather than
+# merely early: (1) `setup`/`sync` then backfilled the same session from its
+# transcript without removing the hook's events, so tool calls and files
+# were counted twice; (2) Claude Code's Stop hook fires after every
+# response, not once per session, and passes `transcript_path` rather than
+# the `transcript` the handler read — so each response wrote another
+# session_end with ai_turns 0. The transcript already holds everything the
+# hooks saw, so `sync` is now the only writer. The commands stay as no-ops
+# so an older install that still wires them doesn't error.
 # ---------------------------------------------------------------------------
 
+def _drain_stdin():
+    try:
+        sys.stdin.read()
+    except Exception:
+        pass
+
+
 def cmd_hook():
-    """PostToolUse hook — fires after every tool call. Accumulates
-    per-session running counts (errors, line deltas, test results) into
-    local state; cmd_stop flushes them into file_change/test_run events."""
-    try:
-        data = json.loads(sys.stdin.read())
-    except Exception as exc:
-        log_hook_error("hook:parse_stdin", exc)
-        return
-
-    try:
-        session_id = data.get("session_id", "unknown")
-        tool_name = data.get("tool_name", "")
-        tool_input = data.get("tool_input", {})
-        tool_response = data.get("tool_response", {}) or {}
-        is_error = tool_response.get("is_error", False)
-
-        state = local_storage.read_state(session_id)
-        if "start_ts" not in state:
-            state["start_ts"] = event_schema.utcnow()
-        if is_error:
-            state["error_count"] = state.get("error_count", 0) + 1
-            if tool_name == "Bash":
-                state["bash_error_count"] = state.get("bash_error_count", 0) + 1
-
-        if tool_name in ("Edit", "Write") and not is_error:
-            la, lr, lang = _lines_for_tool_use(tool_name, tool_input)
-            touched = set(state.get("touched_files", []))
-            fp = tool_input.get("file_path", "")
-            if fp:
-                touched.add(fp)
-            state["touched_files"] = sorted(touched)
-            state["lines_added"] = state.get("lines_added", 0) + la
-            state["lines_removed"] = state.get("lines_removed", 0) + lr
-            if lang:
-                langs = state.get("languages", {})
-                langs[lang] = langs.get(lang, 0) + 1
-                state["languages"] = langs
-
-        if tool_name == "Bash":
-            tr = shell_signals.test_run_for_command(tool_input.get("command", ""), is_error)
-            if tr:
-                invocations, clean_exits = tr
-                state["tests"] = state.get("tests", 0) + invocations
-                state["tests_passed"] = state.get("tests_passed", 0) + clean_exits
-
-        local_storage.write_state(session_id, state)
-
-        if tool_name == "Skill":
-            ev = event_schema.make_event("skill_use", session_id, SOURCE, {
-                "skill": tool_input.get("skill", ""),
-                "success": not is_error,
-            })
-        elif tool_name == "Agent":
-            ev = event_schema.make_event("agent_invoke", session_id, SOURCE, {
-                "subagent_type": tool_input.get("subagent_type", ""),
-                "run_in_background": bool(tool_input.get("run_in_background", False)),
-                "success": not is_error,
-            })
-        elif tool_name.startswith("mcp__"):
-            parts = tool_name.split("__")
-            ev = event_schema.make_event("mcp_tool_call", session_id, SOURCE, {
-                "server": parts[1] if len(parts) > 1 else "",
-                "tool": parts[2] if len(parts) > 2 else tool_name,
-                "success": not is_error,
-            })
-        else:
-            ev = event_schema.make_event("tool_call", session_id, SOURCE, {
-                "tool": tool_name,
-                "success": not is_error,
-            })
-
-        local_storage.append_event(ev)
-    except Exception as exc:
-        log_hook_error("hook:process", exc)
+    """No-op (see above) — kept for installs that still wire PostToolUse."""
+    _drain_stdin()
 
 
 def cmd_stop():
-    """Stop hook — fires when a Claude Code session ends. Parses transcript
-    for tokens, flushes cmd_hook's accumulated file/test state."""
-    try:
-        data = json.loads(sys.stdin.read())
-    except Exception as exc:
-        log_hook_error("stop:parse_stdin", exc)
-        return
-
-    try:
-        session_id = data.get("session_id", "unknown")
-        transcript = data.get("transcript", [])
-        state = local_storage.read_state(session_id)
-        now = event_schema.utcnow()
-
-        ai_turns = []
-        user_turns = 0
-        tool_counts = {}
-        models_seen = set()
-
-        for entry in transcript:
-            t = entry.get("type", "")
-            if t == "user":
-                user_turns += 1
-            elif t == "assistant":
-                msg = entry.get("message", {})
-                model = msg.get("model", "")
-                if model:
-                    models_seen.add(model)
-                usage = msg.get("usage", {})
-                in_tok = usage.get("input_tokens", 0)
-                out_tok = usage.get("output_tokens", 0)
-                if in_tok or out_tok:
-                    ai_turns.append({
-                        "model": model,
-                        "input_tokens": in_tok,
-                        "output_tokens": out_tok,
-                        "cache_creation_tokens": usage.get("cache_creation_input_tokens", 0),
-                        "cache_read_tokens": usage.get("cache_read_input_tokens", 0),
-                        "stop_reason": msg.get("stop_reason", ""),
-                        "ts": entry.get("timestamp", now),
-                    })
-                for c in msg.get("content", []):
-                    if c.get("type") == "tool_use":
-                        name = c.get("name", "")
-                        tool_counts[name] = tool_counts.get(name, 0) + 1
-
-        for turn in ai_turns:
-            local_storage.append_event(event_schema.make_event("ai_turn", session_id, SOURCE, {
-                "model": turn["model"],
-                "input_tokens": turn["input_tokens"],
-                "output_tokens": turn["output_tokens"],
-                "cache_creation_tokens": turn["cache_creation_tokens"],
-                "cache_read_tokens": turn["cache_read_tokens"],
-                "stop_reason": turn["stop_reason"],
-            }, ts=turn["ts"]))
-
-        total_tool_calls = sum(tool_counts.values())
-        dur = event_schema.duration_seconds(state.get("start_ts"), now)
-
-        touched_files = state.get("touched_files", [])
-        if touched_files:
-            languages = state.get("languages", {})
-            local_storage.append_event(event_schema.make_event("file_change", session_id, SOURCE, {
-                "files_count": len(touched_files),
-                "lines_added": state.get("lines_added", 0),
-                "lines_removed": state.get("lines_removed", 0),
-                "language": max(languages, key=languages.get) if languages else None,
-                "languages": sorted(languages.keys()) if languages else [],
-            }))
-
-        if state.get("tests"):
-            local_storage.append_event(event_schema.make_event("test_run", session_id, SOURCE, {
-                "tests": state.get("tests", 0),
-                "passed": state.get("tests_passed", 0),
-            }))
-
-        local_storage.append_event(event_schema.make_event("session_end", session_id, SOURCE, {
-            "trigger": "stop_hook",
-            "ai_turns": len(ai_turns),
-            "user_turns": user_turns,
-            "total_tool_calls": total_tool_calls,
-            "tool_chain_length": total_tool_calls,
-            "multi_step": total_tool_calls > 1,
-            "duration_seconds": dur,
-            "error_count": state.get("error_count", 0),
-            "bash_error_count": state.get("bash_error_count", 0),
-            "models_used": sorted(models_seen),
-        }))
-
-        local_storage.delete_state(session_id)
-    except Exception as exc:
-        log_hook_error("stop:process", exc)
+    """No-op (see above) — kept for installs that still wire Stop."""
+    _drain_stdin()
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +156,15 @@ def parse_conversation(fpath, observed_at):
     session_id = None
     session_start_ts = None
     session_end_ts = None
-    ai_turns = []
+    first_ts = None
+    last_ts = None
+    # One entry per API response. Claude Code writes one transcript line per
+    # content block (thinking, text, each tool_use), each repeating the same
+    # message.id and usage — appending per line (the pre-2 behaviour)
+    # counted every response and its tokens ~6x. Keyed by message.id; the
+    # last line's usage wins, since it carries the final output count.
+    ai_turns = {}
+    features = set()
     tool_type_counts = {}
     error_count = 0
     bash_error_count = 0
@@ -278,7 +196,7 @@ def parse_conversation(fpath, observed_at):
     except Exception:
         return []
 
-    for line in lines:
+    for line_no, line in enumerate(lines):
         try:
             d = json.loads(line.strip())
         except Exception:
@@ -286,6 +204,9 @@ def parse_conversation(fpath, observed_at):
 
         t = d.get("type", "")
         ts = d.get("timestamp", "")
+        if ts:
+            first_ts = first_ts or ts
+            last_ts = ts
 
         if t == "queue-operation":
             sid = d.get("sessionId", "")
@@ -296,12 +217,22 @@ def parse_conversation(fpath, observed_at):
             if d.get("operation") == "dequeue":
                 session_end_ts = ts
 
+        elif t == "attachment":
+            if ((d.get("attachment") or {}).get("type") or "").startswith("plan_mode"):
+                features.add("plan_mode")
+
         elif t == "user":
             if not session_id:
                 session_id = d.get("sessionId", "")
             if not permission_mode:
                 permission_mode = d.get("permissionMode", "")
-            user_turns += 1
+            if d.get("permissionMode") == "plan":
+                features.add("plan_mode")
+            typed = _typed_prompt_blocks(d)
+            if typed:
+                user_turns += 1
+                if "image" in typed:
+                    features.add("image_input")
 
             content = d.get("message", {}).get("content", "")
             if isinstance(content, list):
@@ -337,20 +268,22 @@ def parse_conversation(fpath, observed_at):
                 if not model:
                     model = m
                 models_seen.add(m)
-            usage = msg.get("usage", {})
+            usage = msg.get("usage", {}) or {}
             out_tokens = usage.get("output_tokens", 0)
             in_tokens = usage.get("input_tokens", 0)
 
-            if in_tokens or out_tokens:
-                ai_turns.append({
+            if (in_tokens or out_tokens) and m != "<synthetic>":
+                key = msg.get("id") or f"line-{line_no}"
+                prior = ai_turns.get(key)
+                ai_turns[key] = {
                     "model": m or model,
                     "input_tokens": in_tokens,
                     "output_tokens": out_tokens,
                     "cache_creation_tokens": usage.get("cache_creation_input_tokens", 0),
                     "cache_read_tokens": usage.get("cache_read_input_tokens", 0),
-                    "stop_reason": msg.get("stop_reason", ""),
-                    "ts": ts or session_start_ts,
-                })
+                    "stop_reason": msg.get("stop_reason") or (prior or {}).get("stop_reason", ""),
+                    "ts": (prior or {}).get("ts") or ts or session_start_ts,
+                }
 
             for c in msg.get("content", []):
                 if c.get("type") != "tool_use":
@@ -359,9 +292,13 @@ def parse_conversation(fpath, observed_at):
                 inp = c.get("input", {})
                 tool_type_counts[name] = tool_type_counts.get(name, 0) + 1
                 pending_tool_uses[c.get("id")] = {"name": name, "input": inp}
+                if name in WEB_TOOLS:
+                    features.add("web_search")
+                elif name in PLAN_TOOLS:
+                    features.add("plan_mode")
                 if name == "Skill":
                     skills.append(inp.get("skill", ""))
-                elif name == "Agent":
+                elif name in SUBAGENT_TOOLS:
                     agents.append(inp.get("subagent_type", ""))
                 elif name.startswith("mcp__"):
                     parts = name.split("__")
@@ -384,7 +321,19 @@ def parse_conversation(fpath, observed_at):
     if not session_id:
         return []
 
+    # Older transcripts have no queue-operation lines at all; fall back to
+    # the first/last timestamped line rather than dating the whole session
+    # to the moment of the backfill.
+    session_start_ts = session_start_ts or first_ts
+    session_end_ts = last_ts or session_end_ts
     base_ts = session_start_ts or observed_at
+
+    if skills:
+        features.add("skills")
+    if agents:
+        features.add("subagents")
+    if mcp_calls:
+        features.add("mcp")
 
     project_dir = fpath.parent
     has_project_instructions = any([
@@ -399,7 +348,7 @@ def parse_conversation(fpath, observed_at):
         "has_project_instructions": has_project_instructions,
     }, ts=base_ts, historical=True, observed_at=observed_at))
 
-    for turn in ai_turns:
+    for turn in ai_turns.values():
         events.append(event_schema.make_event("ai_turn", session_id, SOURCE, {
             "model": turn["model"],
             "input_tokens": turn["input_tokens"],
@@ -459,7 +408,11 @@ def parse_conversation(fpath, observed_at):
         "duration_seconds": dur,
         "error_count": error_count,
         "bash_error_count": bash_error_count,
-        "models_used": sorted(models_seen),
+        "models_used": sorted(m for m in models_seen if m != "<synthetic>"),
+        # Which optional capabilities this session used — presence only,
+        # never how often. Keys: subagents, mcp, skills, plan_mode,
+        # web_search, image_input. Feeds the Feature Exploration vector.
+        "features": sorted(features),
     }, ts=session_end_ts or base_ts, historical=True, observed_at=observed_at))
 
     return events
@@ -481,13 +434,21 @@ def cmd_backfill():
     skipped = 0
     total_events = 0
 
+    # Also clears any events the retired live hooks wrote (never
+    # `historical`), which would otherwise double-count against the backfill.
+    reparse_all = local_storage.reset_source_if_parser_changed(SOURCE, PARSER_VERSION)
+    if reparse_all:
+        print(f"Collector updated (parser v{PARSER_VERSION}) — re-reading all Claude Code history once.")
+
+    parsed = []  # (session_id, mtime, events)
+    to_refresh = set()
     for project_dir in sorted(CLAUDE_PROJECTS.iterdir()):
         if not project_dir.is_dir():
             continue
         for conv_file in sorted(project_dir.glob("*.jsonl")):
             session_id = conv_file.stem
             current_mtime = conv_file.stat().st_mtime
-            recorded_mtime = local_storage.backfill_mtime(session_id)
+            recorded_mtime = None if reparse_all else local_storage.backfill_mtime(session_id)
 
             if recorded_mtime is not None and current_mtime <= recorded_mtime:
                 skipped += 1
@@ -498,17 +459,24 @@ def cmd_backfill():
                 continue
 
             if recorded_mtime is not None:
-                local_storage.remove_session_events(session_id)
+                to_refresh.add(session_id)
+                to_refresh.update(ev["session_id"] for ev in evs)
                 refreshed_sessions += 1
             else:
                 new_sessions += 1
+            parsed.append((session_id, current_mtime, evs))
 
-            for ev in evs:
-                date_str = ev.get("ts", "")[:10] or datetime.date.today().isoformat()
-                local_storage.append_event(ev, date_str)
-                total_events += 1
+    # One pass over the store for every grown session, not one per session.
+    local_storage.remove_sessions_events(to_refresh)
 
-            local_storage.set_backfill_mtime(session_id, current_mtime)
+    for session_id, current_mtime, evs in parsed:
+        for ev in evs:
+            date_str = ev.get("ts", "")[:10] or datetime.date.today().isoformat()
+            local_storage.append_event(ev, date_str)
+            total_events += 1
+        local_storage.set_backfill_mtime(session_id, current_mtime)
+
+    local_storage.set_parser_version(SOURCE, PARSER_VERSION)
 
     print("Backfill complete.")
     print(f"  New sessions        : {new_sessions}")
@@ -526,8 +494,8 @@ def find_active_session_file():
     """
     Find the JSONL file for the current active session.
     Strategy:
-      1. Look for session_ids in STATE_DIR (written by PostToolUse hook, deleted at Stop).
-         These are sessions actively in progress right now.
+      1. Look for session_ids in STATE_DIR (only ever written by the retired
+         live hooks, so normally empty now).
       2. Cross-reference with ~/.claude/projects/**/<session_id>.jsonl.
       3. Fall back to the most recently modified JSONL in projects if no state match.
     Returns (session_id, Path) or (None, None).
@@ -557,8 +525,7 @@ def cmd_snapshot():
         return
 
     now = event_schema.utcnow()
-    ai_turns_count = 0
-    input_tokens = output_tokens = cache_tokens = 0
+    usage_by_response = {}  # message.id -> usage, same de-duplication as parse_conversation()
     tool_counts = {}
     user_turns = 0
     models_seen = set()
@@ -574,7 +541,7 @@ def cmd_snapshot():
         print(f"Could not read session file: {e}")
         return
 
-    for line in lines:
+    for line_no, line in enumerate(lines):
         try:
             d = json.loads(line.strip())
         except Exception:
@@ -582,34 +549,30 @@ def cmd_snapshot():
 
         t = d.get("type", "")
         ts = d.get("timestamp", "")
+        if ts and not session_start_ts:
+            session_start_ts = ts
 
         if t == "queue-operation":
-            if d.get("operation") == "enqueue" and not session_start_ts:
-                session_start_ts = ts
             sid = d.get("sessionId", "")
             if sid:
                 session_id = sid
 
         elif t == "user":
-            user_turns += 1
+            if _typed_prompt_blocks(d):
+                user_turns += 1
             if not permission_mode:
                 permission_mode = d.get("permissionMode", "")
 
         elif t == "assistant":
             msg = d.get("message", {})
             m = msg.get("model", "")
-            if m:
+            if m and m != "<synthetic>":
                 if not model:
                     model = m
                 models_seen.add(m)
-            usage = msg.get("usage", {})
-            in_tok = usage.get("input_tokens", 0)
-            out_tok = usage.get("output_tokens", 0)
-            if in_tok or out_tok:
-                ai_turns_count += 1
-                input_tokens += in_tok
-                output_tokens += out_tok
-                cache_tokens += usage.get("cache_creation_input_tokens", 0) + usage.get("cache_read_input_tokens", 0)
+            usage = msg.get("usage", {}) or {}
+            if (usage.get("input_tokens") or usage.get("output_tokens")) and m != "<synthetic>":
+                usage_by_response[msg.get("id") or f"line-{line_no}"] = usage
             for c in msg.get("content", []):
                 if c.get("type") == "tool_use":
                     name = c.get("name", "")
@@ -619,6 +582,13 @@ def cmd_snapshot():
                         if fp:
                             files_changed.add(fp)
 
+    ai_turns_count = len(usage_by_response)
+    input_tokens = sum(u.get("input_tokens", 0) for u in usage_by_response.values())
+    output_tokens = sum(u.get("output_tokens", 0) for u in usage_by_response.values())
+    cache_tokens = sum(
+        u.get("cache_creation_input_tokens", 0) + u.get("cache_read_input_tokens", 0)
+        for u in usage_by_response.values()
+    )
     total_tool_calls = sum(tool_counts.values())
     elapsed = event_schema.duration_seconds(session_start_ts, now)
 
@@ -808,8 +778,11 @@ def cmd_status():
                 for entry in hooks.get("Stop", [])
                 for h in entry.get("hooks", [])
             )
-            print(f"PostToolUse hook : {'✓ wired' if post else '✗ missing'}")
-            print(f"Stop hook        : {'✓ wired' if stop else '✗ missing'}")
+            # Hooks are retired (see "Live hooks — retired" above): `sync`
+            # reads the transcripts directly, so nothing is missing without them.
+            print("Live hooks       : not needed — run 'sync' to collect")
+            if post or stop:
+                print("                   (older install still wires them; they're harmless no-ops)")
         except Exception:
             print("settings.json    : could not parse")
     else:

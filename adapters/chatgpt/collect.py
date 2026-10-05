@@ -2,13 +2,10 @@
 """
 AI Propensity Signal Collector — ChatGPT (web) Adapter
 
-** STATUS: v0, unverified against a real export. ** Field names follow the
-publicly documented shape of ChatGPT's data export (a `conversations.json`
-of conversation objects, each a `mapping` of node-id -> {message, parent,
-children}) but this has NOT been run against an actual export file. Try
-`import` on a real export and fix field names before relying on this —
-see the "Claude.ai / ChatGPT
-adapters — status".
+Verified against a real export (2026-10-05, ~500 conversations, split
+into conversations-NNN.json files): turn counts and character totals match
+the export exactly. The export keeps only the final branch of each
+conversation, so edits/regenerations are invisible to it.
 
 Same rationale as the claude-web adapter: ChatGPT is server-hosted with no
 local hook surface, so the user's own data export (Settings -> Data
@@ -90,7 +87,7 @@ def _load_export(path_str):
 
     if not isinstance(raw, list):
         print("Expected the export's top level to be a list of conversations — got something else. "
-              "This adapter is unverified against a real export; check the actual shape and fix _load_export().")
+              "The export format may have changed; check the actual shape and fix _load_export().")
         return None
     return raw
 
@@ -122,26 +119,74 @@ def _messages_of(conversation):
     return nodes
 
 
-def _count_edit_branches(conversation):
-    """Structural edit/regeneration signal, never content: ChatGPT's
-    `mapping` tree branches into multiple children at a node when the user
-    edits a message or regenerates a response — each extra child beyond the
-    first at a branch point is one edit/regenerate event. Feeds the
-    `iteration_refinement` card, scored by Valuezen — the chat equivalent
-    of a validation-discipline signal, since there's no execution ground
-    truth in a pure conversation."""
-    mapping = conversation.get("mapping", {})
-    edits = 0
-    for node in mapping.values():
-        children = node.get("children") or []
-        if len(children) > 1:
-            edits += len(children) - 1
-    return edits
+# Parser history — bump when _features_of()/cmd_import() change what's
+# extracted, so the next import replaces older chatgpt evidence instead of
+# skipping conversations it has already seen.
+#   2 (2026-10-05): per-conversation `features`; `edit_count` dropped (the
+#     export keeps only each chat's final branch, so edits were never
+#     visible — it read 0 for every conversation); conversations that
+#     changed since the last import are replaced rather than skipped.
+PARSER_VERSION = 2
+
+_WEB_REFERENCE_TYPES = ("grouped_webpages", "webpage_extended", "webpage")
+
+
+def _features_of(conversation):
+    """Which optional ChatGPT capabilities this conversation used —
+    presence only, read from export metadata, never message text. Keys:
+    web_search, file_upload, image_input, reasoning, deep_research,
+    projects, connectors, created_files. Verified against a real export
+    (2026-10-05); the tool-message checks cover fuller exports that keep
+    tool messages, which that one didn't."""
+    features = set()
+    template = conversation.get("conversation_template_id") or conversation.get("gizmo_id") or ""
+    # "g-p-..." is a Project. Other "g-..." ids aren't reliably custom GPTs
+    # (one such id sat on 65% of a real user's ordinary chats), so they're
+    # not counted.
+    if isinstance(template, str) and template.startswith("g-p-"):
+        features.add("projects")
+    if conversation.get("plugin_ids"):
+        features.add("connectors")
+
+    for node in (conversation.get("mapping") or {}).values():
+        msg = node.get("message")
+        if not msg:
+            continue
+        md = msg.get("metadata") or {}
+        content = msg.get("content") or {}
+        author = msg.get("author") or {}
+        role = author.get("role", "")
+        tool_name = (author.get("name") or "") if role == "tool" else ""
+        recipient = msg.get("recipient") or ""
+        model = md.get("model_slug") or ""
+
+        if md.get("search_result_groups") or any(
+            (r or {}).get("type") in _WEB_REFERENCE_TYPES for r in (md.get("content_references") or [])
+        ) or tool_name.startswith(("web", "browser")) or recipient.startswith(("web", "browser")):
+            features.add("web_search")
+
+        for a in md.get("attachments") or []:
+            mime = (a or {}).get("mime_type") or ""
+            features.add("image_input" if mime.startswith("image/") else "file_upload")
+        if role == "user" and content.get("content_type") == "multimodal_text":
+            if any(isinstance(part, dict) and part.get("content_type") == "image_asset_pointer"
+                   for part in content.get("parts") or []):
+                features.add("image_input")
+
+        # ChatGPT sometimes routes to a reasoning model on its own; the
+        # 2-session rule in scoring keeps one auto-switch from counting.
+        if content.get("content_type") in ("thoughts", "reasoning_recap") or "thinking" in model:
+            features.add("reasoning")
+        if md.get("async_task_title") or "research" in model:
+            features.add("deep_research")
+        if tool_name.startswith(("canmore", "python", "dalle", "image_gen")) or recipient.startswith(("canmore", "python")):
+            features.add("created_files")
+    return features
 
 
 def _user_chars_total(messages):
-    """Length only, never the text itself — feeds the `prompt_investment`
-    card. Computed from the same `messages` list `_messages_of()` already
+    """Length only, never the text itself — feeds the Prompt &
+    Conversation Depth vector. Computed from the same `messages` list `_messages_of()` already
     builds for turn counting; the text is never written to disk or
     exported, only its length."""
     return sum(len(m["text"]) for m in messages if m["role"] == "user")
@@ -149,10 +194,9 @@ def _user_chars_total(messages):
 
 def _ai_chars_total(messages):
     """Same length-only treatment as `_user_chars_total`, for assistant
-    replies — the closest honest substitute for a "response substance"
-    signal when there's no real token count in this export (ChatGPT's
-    export has no per-message usage numbers). Used by Valuezen's scoring
-    as a labeled proxy, not a token count."""
+    replies. ChatGPT's export has no per-message usage numbers, so
+    Valuezen estimates Token Usage as (user + AI characters) ÷ 4 — shown
+    on the report as an estimate, never scored."""
     return sum(len(m["text"]) for m in messages if m["role"] == "assistant")
 
 
@@ -174,14 +218,25 @@ def cmd_import():
         return
 
     total_sessions = 0
+    refreshed = 0
     skipped = 0
     total_events = 0
 
+    reparse_all = local_storage.reset_source_if_parser_changed(SOURCE, PARSER_VERSION)
+    if reparse_all:
+        print(f"Collector updated (parser v{PARSER_VERSION}) — replacing previously imported ChatGPT evidence.")
+
+    pending = []  # (session_id, version, events)
+    to_refresh = set()
     for conv in conversations:
         session_id = conv.get("conversation_id") or conv.get("id") or ""
         if not session_id:
             continue
-        if local_storage.already_backfilled(session_id):
+        # A conversation that gained messages since the last import has a
+        # newer update_time — replace it rather than skipping it as seen.
+        version = str(conv.get("update_time") or "")
+        recorded = None if reparse_all else local_storage.backfill_mtime(session_id)
+        if recorded is not None and recorded == version:
             skipped += 1
             continue
 
@@ -208,26 +263,37 @@ def cmd_import():
             "ai_turns": len(assistant_turns),
             "user_turns": user_turns,
             "duration_seconds": event_schema.duration_seconds(start_ts, end_ts),
-            "edit_count": _count_edit_branches(conv),
             "user_chars_total": _user_chars_total(messages),
             "ai_chars_total": _ai_chars_total(messages),
+            "features": sorted(_features_of(conv)),
         }, ts=end_ts or start_ts, historical=True, observed_at=event_schema.utcnow()))
 
-        total_sessions += 1
+        if recorded is not None:
+            to_refresh.add(session_id)
+            refreshed += 1
+        else:
+            total_sessions += 1
+        pending.append((session_id, version, events))
+
+    local_storage.remove_sessions_events(to_refresh)
+    for session_id, version, events in pending:
         for ev in events:
             date_str = (ev.get("ts") or "")[:10] or datetime.date.today().isoformat()
             local_storage.append_event(ev, date_str)
             total_events += 1
+        local_storage.set_backfill_mtime(session_id, version)
+    local_storage.set_parser_version(SOURCE, PARSER_VERSION)
 
     print("Import complete.")
     print(f"  Conversations imported : {total_sessions}")
-    print(f"  Skipped (already seen) : {skipped}")
+    print(f"  Updated since last time: {refreshed}")
+    print(f"  Skipped (unchanged)    : {skipped}")
     print(f"  Events written         : {total_events}")
     print(f"  Store location         : {local_storage.STORE_DIR}")
-    if total_sessions == 0 and skipped == 0:
+    if total_sessions == 0 and skipped == 0 and refreshed == 0:
         print()
         print("Zero conversations imported — this most likely means the export's real field")
-        print("names don't match what this v0 adapter expects. Inspect the export JSON by hand")
+        print("names no longer match what this adapter expects. Inspect the export JSON by hand")
         print("and fix _messages_of()/cmd_import() in this file before relying on it.")
 
 

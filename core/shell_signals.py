@@ -9,11 +9,18 @@ never command output content.
 import re
 from pathlib import Path
 
+# Programming languages only — an allow-list, not a lookup with a fallback.
+# Docs, config and data files (md, txt, json, yaml, env, ...) still count
+# as files touched, but never as a "language": the old fallback returned
+# the bare extension for anything unmapped, so real evidence carried
+# "languages" like markdown, txt, json, prod, example and stage.
 LANGUAGE_BY_EXT = {
-    "py": "python", "js": "javascript", "jsx": "javascript", "ts": "typescript", "tsx": "typescript",
-    "go": "go", "rs": "rust", "java": "java", "rb": "ruby", "c": "c", "cpp": "c++", "h": "c",
-    "sh": "shell", "sql": "sql", "md": "markdown", "json": "json", "yaml": "yaml", "yml": "yaml",
-    "css": "css", "html": "html", "swift": "swift", "kt": "kotlin", "php": "php",
+    "py": "python", "js": "javascript", "jsx": "javascript", "mjs": "javascript", "cjs": "javascript",
+    "ts": "typescript", "tsx": "typescript", "go": "go", "rs": "rust", "java": "java", "rb": "ruby",
+    "c": "c", "h": "c", "cpp": "c++", "cc": "c++", "hpp": "c++", "cs": "c#", "sh": "shell",
+    "bash": "shell", "zsh": "shell", "sql": "sql", "css": "css", "scss": "css", "html": "html",
+    "vue": "vue", "svelte": "svelte", "swift": "swift", "kt": "kotlin", "php": "php", "scala": "scala",
+    "dart": "dart", "r": "r", "lua": "lua", "ex": "elixir", "exs": "elixir",
 }
 
 # Best-effort: does this shell command *contain* a test-runner invocation
@@ -29,8 +36,10 @@ TEST_CMD_RE = re.compile(
 
 
 def language_for(file_path):
+    """Programming language for a file path, or None for anything not on
+    the allow-list above (docs, config, data, unknown extensions)."""
     ext = Path(file_path).suffix.lstrip(".").lower()
-    return LANGUAGE_BY_EXT.get(ext, ext or None)
+    return LANGUAGE_BY_EXT.get(ext)
 
 
 def test_run_for_command(command, is_error):

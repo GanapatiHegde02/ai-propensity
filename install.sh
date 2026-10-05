@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # AI Propensity Collector — manual installer (fallback if not using /plugin install)
 # Prefer: open Claude Code → /plugin marketplace add <path> → /plugin install ai-collect
+#
+# Collection is `sync`-driven (it reads ~/.claude/projects directly), so
+# there are no hooks to wire. Earlier versions wired PostToolUse/Stop hooks;
+# this removes them if present, since their evidence double-counted.
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,39 +26,37 @@ echo ""
 mkdir -p "$HOME/.valuezen/propensity/events"
 echo "✓ Created ~/.valuezen/propensity/events/"
 
-# Wire hooks into ~/.claude/settings.json
+# Remove hooks an earlier version of this installer wired
 SETTINGS="$HOME/.claude/settings.json"
-HOOK_CMD_HOOK="$PYTHON $SCRIPT_DIR/adapters/claude-code/collect.py hook"
-HOOK_CMD_STOP="$PYTHON $SCRIPT_DIR/adapters/claude-code/collect.py stop"
-
-$PYTHON - <<PYEOF
+if [ -f "$SETTINGS" ]; then
+    $PYTHON - <<PYEOF
 import json
 from pathlib import Path
 
 settings_path = Path("$SETTINGS")
-cfg = json.load(open(settings_path)) if settings_path.exists() else {}
+cfg = json.load(open(settings_path))
+hooks = cfg.get("hooks", {})
+changed = False
 
-hooks = cfg.setdefault("hooks", {})
+for event in ("PostToolUse", "Stop"):
+    entries = hooks.get(event, [])
+    for entry in entries:
+        kept = [h for h in entry.get("hooks", []) if "collect.py" not in h.get("command", "")]
+        if len(kept) != len(entry.get("hooks", [])):
+            changed = True
+        entry["hooks"] = kept
+    if event in hooks:
+        hooks[event] = [entry for entry in entries if entry.get("hooks")]
 
-post_hooks = hooks.setdefault("PostToolUse", [])
-hook_cmd = "$HOOK_CMD_HOOK"
-if not any(hook_cmd in h.get("command","") for e in post_hooks for h in e.get("hooks",[])):
-    post_hooks.append({"matcher":"","hooks":[{"type":"command","command":hook_cmd}]})
-
-stop_hooks = hooks.setdefault("Stop", [])
-stop_cmd = "$HOOK_CMD_STOP"
-if not any(stop_cmd in h.get("command","") for e in stop_hooks for h in e.get("hooks",[])):
-    stop_hooks.append({"matcher":"","hooks":[{"type":"command","command":stop_cmd}]})
-
-with open(settings_path, "w") as f:
-    json.dump(cfg, f, indent=2)
-    f.write("\n")
-
-print("✓ Hooks wired into ~/.claude/settings.json")
+if changed:
+    with open(settings_path, "w") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+    print("✓ Removed retired collector hooks from ~/.claude/settings.json")
 PYEOF
+fi
 
 echo ""
 echo "Manual install complete."
-echo "  Restart Claude Code for hooks to take effect."
-echo "  Then run: $PYTHON $SCRIPT_DIR/adapters/claude-code/collect.py sync"
-echo "  And:      $PYTHON $SCRIPT_DIR/adapters/claude-code/collect.py summary"
+echo "  Collect + write the upload file: $PYTHON $SCRIPT_DIR/adapters/claude-code/collect.py sync"
+echo "  See what was captured:           $PYTHON $SCRIPT_DIR/adapters/claude-code/collect.py summary"

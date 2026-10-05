@@ -99,13 +99,14 @@ def set_backfill_mtime(session_id, mtime):
     _write_backfill_manifest(manifest)
 
 
-def remove_session_events(session_id):
-    """Delete every stored event for this session (across all day files) so
-    it can be re-backfilled from scratch without duplicating the events
-    already captured from an earlier, incomplete pass. Returns the count
-    removed. Rewrites each touched day file under the same lock append_event
-    uses, so this is safe to run alongside live hooks."""
+def remove_events_where(predicate):
+    """Delete every stored event (across all day files) for which
+    `predicate(event)` is true, in a single pass over the store. Returns the
+    count removed. Rewrites each touched day file under the same lock
+    append_event uses."""
     removed = 0
+    if not STORE_DIR.exists():
+        return 0
     for fpath in sorted(STORE_DIR.glob("*.jsonl")):
         kept = []
         changed = False
@@ -117,7 +118,7 @@ def remove_session_events(session_id):
                 except Exception:
                     kept.append(line)
                     continue
-                if ev.get("session_id") == session_id:
+                if predicate(ev):
                     removed += 1
                     changed = True
                 else:
@@ -129,6 +130,53 @@ def remove_session_events(session_id):
                 f.writelines(kept)
                 _unlock(f)
     return removed
+
+
+def remove_session_events(session_id):
+    """Delete every stored event for this session so it can be re-backfilled
+    from scratch without duplicating the events already captured from an
+    earlier, incomplete pass. Returns the count removed."""
+    return remove_events_where(lambda ev: ev.get("session_id") == session_id)
+
+
+def remove_sessions_events(session_ids):
+    """Batch form of remove_session_events — one pass for many sessions."""
+    ids = set(session_ids)
+    if not ids:
+        return 0
+    return remove_events_where(lambda ev: ev.get("session_id") in ids)
+
+
+# Each adapter stamps the version of its parser into the manifest. When a
+# parser fix changes what gets extracted from the same source file (e.g.
+# de-duplicating Claude Code responses), every event that adapter wrote
+# with the old parser is wrong, not just stale — so a version mismatch
+# removes that source's events once and re-parses everything, instead of
+# leaving old and new numbers side by side.
+_PARSER_VERSIONS_KEY = "__parser_versions__"
+
+
+def parser_version(source):
+    return (_read_backfill_manifest().get(_PARSER_VERSIONS_KEY) or {}).get(source)
+
+
+def set_parser_version(source, version):
+    manifest = _read_backfill_manifest()
+    versions = manifest.get(_PARSER_VERSIONS_KEY) or {}
+    versions[source] = version
+    manifest[_PARSER_VERSIONS_KEY] = versions
+    _write_backfill_manifest(manifest)
+
+
+def reset_source_if_parser_changed(source, version):
+    """Returns True (after removing every stored event for `source`) when
+    the stored parser version differs from `version`; the caller should then
+    ignore recorded mtimes and re-parse everything. Returns False when the
+    store is already current."""
+    if parser_version(source) == version:
+        return False
+    remove_events_where(lambda ev: ev.get("source") == source)
+    return True
 
 
 def already_backfilled(session_id):
