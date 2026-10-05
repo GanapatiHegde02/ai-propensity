@@ -241,6 +241,7 @@ def parse_conversation(fpath, observed_at):
             "lines_added": lines_added,
             "lines_removed": lines_removed,
             "language": max(languages, key=languages.get) if languages else None,
+            "languages": sorted(languages.keys()) if languages else [],
         }, ts=session_end_ts or base_ts, historical=True, observed_at=observed_at))
 
     if tests_total:
