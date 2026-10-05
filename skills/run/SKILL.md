@@ -61,18 +61,11 @@ python3 "${CLAUDE_PLUGIN_ROOT}/adapters/claude-code/collect.py" prune
 python3 "${CLAUDE_PLUGIN_ROOT}/adapters/claude-code/collect.py" prune 30
 ```
 
-### `classify [N]`
-**Opt-in, advanced tier.** Unlike every other command, this one reads conversation content — a bounded excerpt of the user's own prompts only, never Claude's replies — and sends it to the user's own `claude` CLI to label each session's domain, up to 5 topics, and outcome (completed/partial/abandoned/unclear). This produces no score of any kind; scoring happens at Valuezen from raw counts, not from this label. The first run always shows a consent notice and requires an explicit `y` before anything is sent — never run it without the user asking for it.
-```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/adapters/claude-code/collect.py" classify
-```
-Classifies up to `N` (default 20) most-recent unclassified sessions; already-classified sessions are skipped automatically, same as `setup`.
-
 ### No subcommand
 Show the available subcommands and a one-line description of each.
 
 ## Notes
-- Never show or expose raw prompt text, AI response content, file contents, or source code — the collector stores metadata only, **except** `classify`, which is opt-in and explicitly consented to per the notice it prints.
+- Never show or expose raw prompt text, AI response content, file contents, or source code — the collector stores metadata only.
 - The plugin never computes a score, tier, or verdict — every score, tier, or verdict is computed by Valuezen after you upload the exported file, never by this plugin.
 - Live collection is automatic — hooks fire on every tool call and session end while this plugin is installed.
 - Run `setup` once after installing to recover evidence from past Claude Code sessions.

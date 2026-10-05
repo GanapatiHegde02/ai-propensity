@@ -22,7 +22,6 @@ absent from every event this adapter writes).
 Usage:
     python3 collect.py import <path-to-export.json-or-directory>
     python3 collect.py summary
-    python3 collect.py classify [N]
     python3 collect.py export
 """
 
@@ -177,8 +176,8 @@ def cmd_import():
 
 
 # ---------------------------------------------------------------------------
-# Classify — same opt-in advanced tier as every other adapter, via
-# core/llm_classify.py. Excerpt is the user's own message text only.
+# Classify — deferred. Implementation kept for a future release, but not
+# wired into COMMANDS below, so it is not reachable from the CLI.
 # ---------------------------------------------------------------------------
 
 CONSENT_NOTICE = """
@@ -273,7 +272,6 @@ def cmd_prune():
 COMMANDS = {
     "import":   cmd_import,
     "sync":     cmd_sync,
-    "classify": cmd_classify,
     "summary":  lambda: summary.print_summary(SOURCE),
     "export":   cmd_export,
     "prune":    cmd_prune,

@@ -72,7 +72,6 @@ The signal about how you use AI is scattered across four different tools, each w
 - 📥 Reads your local AI usage history (Claude Code, Codex) or a personal data export (Claude.ai, ChatGPT) and normalizes it into a common event schema — pure metadata extraction, no content parsing.
 - ✅ **Captures:** sessions · AI turns · token counts (real counts from Claude Code and Codex; exports have no token data) · tool/skill/agent/MCP calls · files changed (counts + line deltas + language) · test-runner invocations (structural: ran + exited cleanly or not, never a parsed test count).
 - 🚫 **Never captures by default:** prompts · AI responses · source code · file contents · credentials.
-- 🧪 **Opt-in only (`classify`):** a bounded excerpt of your own prompts (never the assistant's replies), sent to your local `claude` CLI for a domain/topic/outcome label — never a score.
 - ⚖️ **Never scores anything.** This plugin only collects and exports raw evidence; Valuezen computes the AI Propensity Index after you upload it.
 
 ### 🔌 Adapters
@@ -176,7 +175,7 @@ This is the *entire* content of the file `export`/`sync` produces — the one an
 }
 ```
 
-Notice what's *not* there: no message text, no diffs, no filenames, no repo names, no test names — `file_change` only ever carries counts and a language guess, `tool_call` only carries which built-in tool ran, `test_run` only carries a pass/fail structural signal. `classify` is the one deliberate exception, and it's opt-in per adapter with its own consent prompt the first time you run it — see [Usage](#%EF%B8%8F-usage) below. Read [`core/event_schema.py`](core/event_schema.py) and any adapter's `collect.py` to verify this against the actual code, not just this README, before you trust it with your data.
+Notice what's *not* there: no message text, no diffs, no filenames, no repo names, no test names — `file_change` only ever carries counts and a language guess, `tool_call` only carries which built-in tool ran, `test_run` only carries a pass/fail structural signal. Read [`core/event_schema.py`](core/event_schema.py) and any adapter's `collect.py` to verify this against the actual code, not just this README, before you trust it with your data.
 
 ---
 
@@ -186,7 +185,6 @@ Notice what's *not* there: no message text, no diffs, no filenames, no repo name
 - Claude Code adapter: Claude Code itself, live
 - Codex adapter: Codex CLI or the Codex VS Code extension, run at least once (writes to `~/.codex/sessions/`, or `%USERPROFILE%\.codex\sessions\` on Windows)
 - claude-web / chatgpt adapters: a personal data export from that product (Settings → Export data)
-- `classify` (any adapter): the `claude` CLI on `PATH`
 
 All paths shown as `~/.valuezen/...` resolve the same way on Windows, since the code uses Python's `Path.home()` rather than a shell path — on Windows that's `%USERPROFILE%\.valuezen\...`. `install.sh`/`uninstall.sh` are bash scripts; run them from Git Bash or WSL, or skip them entirely and use the plugin install (Option A below), which doesn't need a shell script at all.
 
@@ -262,7 +260,6 @@ These have no local hook surface to attach to — the product runs server-side, 
 | `import <path>` | — | — | ✅ | Just the import half of `sync`. Same skip-if-seen behavior as `setup` (session-presence only, not mtime-aware — a finished export doesn't grow). |
 | `summary` | ✅ | ✅ | ✅ | Print raw tallies — counts and sums only, no scores, no ratios, no cost estimate. |
 | `export` | ✅ | ✅ | ✅ | Write `~/.valuezen/<source>/propensity-evidence-<date>.json` for upload to Valuezen. |
-| `classify [N]` | ✅ | ✅ | ✅ (`classify <path> [N]`) | **Opt-in, advanced tier — run `setup`/`import`/`sync` first.** Labels sessions that already exist in the store; it does not collect them itself. Domain/topics/outcome label via your local `claude` CLI. Consent notice on first run. |
 | `status` | ✅ | ✅ (no hooks to report — just store stats) | — | Hook wiring (Claude Code) / event store stats. |
 | `prune [days]` / `retention [days]` | ✅ | ✅ | ✅ / — | Apply/configure local retention. |
 
@@ -273,29 +270,13 @@ These have no local hook surface to attach to — the product runs server-side, 
 ```bash
 python3 collect.py export
 ```
-Writes `~/.valuezen/<source>/propensity-evidence-<date>.json`, filtered to just that adapter's own events (the local store is shared by every adapter, so this is safe by default — no flag needed to avoid mixing sources) — `{schema_version, source, exported_at, tiers_included, events}`. `tiers_included` records whether `classify` was ever run (`["basic"]` vs `["basic", "advanced"]`), so the upload is self-documenting about what's in it.
+Writes `~/.valuezen/<source>/propensity-evidence-<date>.json`, filtered to just that adapter's own events (the local store is shared by every adapter, so this is safe by default — no flag needed to avoid mixing sources) — `{schema_version, source, exported_at, tiers_included, events}`. `tiers_included` records which tiers of data the export contains, so the upload is self-documenting about what's in it.
 
 To combine specific sources into one export instead (e.g. Claude Code + Codex together, or Claude.ai + ChatGPT together), pass `--only`:
 ```bash
 python3 collect.py export --only claude_web,chatgpt
 ```
 This lands under a combined-label directory instead (`~/.valuezen/claude_web+chatgpt/`), so it never collides with a plain single-source export.
-
----
-
-## 🏷️ Classify (opt-in, advanced tier)
-
-> ⚠️ **Run `setup` / `import` / `sync` first.** `classify` only labels sessions that are *already* in your local evidence store — it does not collect usage data (turns, tokens, message counts) itself. Run it on an empty store and you'll get a report with a domain/topic label but zero of the counts everything else is built from. If you've already run `sync` regularly, you're covered — this only matters if `classify` is the first command you've ever run.
->
-> Also note: on the Valuezen report, this data currently only shows up for **claude-web / chatgpt** sources (it fills in the "Domain & Outcome Signal" card, since those sources have no execution data of their own). For **Claude Code / Codex**, the label is still captured and exported, but the report doesn't display it — those sources already have richer signal (tool calls, file diffs, test runs) that the report draws on instead, so there's no example for them here.
-
-**claude-web / chatgpt** — point it at your downloaded data export:
-```bash
-python3 collect.py classify <path-to-export>       # classify up to 20
-python3 collect.py classify <path-to-export> 5      # classify only 5
-```
-
-First run shows a consent notice and asks `[y/N]` before sending anything — say yes once and it's remembered. Each session's own prompts (never the assistant's replies) are sent to your local `claude` CLI, which returns a `domain` / `topics` / `task_type` / `outcome` label — never a score. Already-classified sessions are skipped automatically, so re-running is cheap. Requires the `claude` CLI on `PATH`.
 
 ---
 
@@ -333,7 +314,6 @@ Historical/imported events also carry `historical: true`, `observed_at`, `proven
 | `file_change` | files_count, lines_added, lines_removed, language | Claude Code, Codex |
 | `test_run` | tests, passed — best-effort, from shell test-runner detection | Claude Code, Codex |
 | `session_end` | trigger, ai_turns, user_turns, duration_seconds, error_count | all |
-| `session_reflect` | **advanced tier, opt-in** — tier, method, domain, topics[], task_type, outcome, outcome_rationale | all, via `classify` |
 
 ### 🗂️ Files in this repo
 
@@ -341,11 +321,11 @@ Historical/imported events also carry `historical: true`, `observed_at`, `proven
 core/                          — adapter-agnostic, shared by every adapter:
 ├── event_schema.py            —   common event shape
 ├── local_storage.py           —   the JSONL store
-├── retention.py                —   retention + shared config (incl. classify consent)
+├── retention.py                —   retention + shared config
 ├── export.py                   —   evidence bundling for upload
 ├── summary.py                  —   raw-tally printer (no scoring)
 ├── shell_signals.py             —   shared test-runner detection + file-extension→language map
-└── llm_classify.py              —   shared "shell to claude -p" advanced-tier machinery
+└── llm_classify.py              —   LLM self-classification machinery (deferred — not wired into any adapter's CLI)
 adapters/
 ├── claude-code/collect.py     —   built, verified against real local history
 ├── codex/collect.py           —   built, verified against real local history (CLI + VS Code extension)

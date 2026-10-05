@@ -168,9 +168,6 @@ def print_summary(source=None):
 
     if reflections:
         print()
-        print(f"--- Advanced tier: {len(reflections)} session(s) LLM-tagged (opt-in, run via `classify`) ---")
+        print(f"--- Advanced tier: {len(reflections)} session(s) LLM-tagged ---")
         print("These carry a domain/topics/outcome label per session — categorical evidence,")
         print("not a score. Run `export` to include them; backend decides what to do with them.")
-    else:
-        print()
-        print("Advanced tier: not run. `collect.py classify` opts in to LLM-based domain/topic/outcome tagging.")

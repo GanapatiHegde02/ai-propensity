@@ -19,7 +19,6 @@ numbers.
 Usage:
     python3 collect.py import <path-to-export.json-or-directory>
     python3 collect.py summary
-    python3 collect.py classify [N]
     python3 collect.py export
 """
 
@@ -232,6 +231,11 @@ def cmd_import():
         print("and fix _messages_of()/cmd_import() in this file before relying on it.")
 
 
+# ---------------------------------------------------------------------------
+# Classify — deferred. Implementation kept for a future release, but not
+# wired into COMMANDS below, so it is not reachable from the CLI.
+# ---------------------------------------------------------------------------
+
 CONSENT_NOTICE = """
 This will send a short excerpt of your own messages from this ChatGPT
 export (not the assistant's replies) to your local `claude` CLI so it can
@@ -324,7 +328,6 @@ def cmd_prune():
 COMMANDS = {
     "import":   cmd_import,
     "sync":     cmd_sync,
-    "classify": cmd_classify,
     "summary":  lambda: summary.print_summary(SOURCE),
     "export":   cmd_export,
     "prune":    cmd_prune,
