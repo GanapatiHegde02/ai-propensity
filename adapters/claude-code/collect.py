@@ -12,8 +12,7 @@ this file.
 
 Privacy-first: captures observable metadata only — tool names, token
 counts, line-count deltas, file extensions/language — never prompt or
-response content, with one deliberate, opt-in exception: `classify` (see
-its own section below).
+response content.
 """
 
 import datetime
@@ -659,17 +658,8 @@ def cmd_snapshot():
 
 
 # ---------------------------------------------------------------------------
-# Classify — opt-in, advanced-tier LLM self-classification
-#
-# Everything above this line reads only metadata. This command is the one
-# place the collector looks at conversation *content* — it builds a bounded
-# excerpt from the user's own prompts and hands it to core/llm_classify.py,
-# which shells out to the user's own already-authenticated `claude` CLI (no
-# separate API key, no third party added to the trust boundary) and asks it
-# for a small categorical label: domain, up to 5 topics, task_type, outcome.
-# Deliberately NOT a score — see core/llm_classify.py's module docstring for
-# why. Never wired into a hook; only runs on explicit request, and only
-# after consent (shared across every adapter via llm_classify.get_consent).
+# Classify — deferred. Implementation kept for a future release, but not
+# wired into COMMANDS below, so it is not reachable from the CLI.
 # ---------------------------------------------------------------------------
 
 CONSENT_NOTICE = """
@@ -889,7 +879,6 @@ COMMANDS = {
     "setup":     cmd_backfill,
     "sync":      cmd_sync,
     "snapshot":  cmd_snapshot,
-    "classify":  cmd_classify,
     "summary":   lambda: summary.print_summary(SOURCE),
     "status":    cmd_status,
     "export":    cmd_export,

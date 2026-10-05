@@ -38,8 +38,7 @@ numbers), file-change line deltas (from apply_patch's unified diff) and
 language, and a structural test-run signal (did an exec_command matching a
 known test runner run, did it exit 0 — via "Process exited with code N" in
 its own output, never a parsed pass/fail count — see
-for why). Never prompt or
-response content, except the opt-in `classify` command.
+for why). Never prompt or response content.
 """
 
 import datetime
@@ -320,8 +319,8 @@ def cmd_backfill():
 
 
 # ---------------------------------------------------------------------------
-# Classify — opt-in, advanced-tier LLM self-classification (see
-# core/llm_classify.py for the shared mechanics and consent flow)
+# Classify — deferred. Implementation kept for a future release, but not
+# wired into COMMANDS below, so it is not reachable from the CLI.
 # ---------------------------------------------------------------------------
 
 CONSENT_NOTICE = """
@@ -475,7 +474,6 @@ def cmd_status():
 COMMANDS = {
     "setup":     cmd_backfill,
     "sync":      cmd_sync,
-    "classify":  cmd_classify,
     "summary":   lambda: summary.print_summary(SOURCE),
     "status":    cmd_status,
     "export":    cmd_export,
